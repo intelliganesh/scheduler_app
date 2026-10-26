@@ -6,6 +6,7 @@ import DashboardPage from "./pages/DashboardPage";
 import ScheduledJobsPage from "./pages/ScheduledJobsPage";
 import TaskManagementPage from "./pages/TaskManagementPage";
 import GeneratedFilesPage from "./pages/GeneratedFilesPage";
+import ConfiguredMenuPage from "./pages/ConfiguredMenuPage";
 import { api } from "./services/api";
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
   async function login(username, password) { const response = await api.login(username, password); sessionStorage.setItem("access_token", response.access_token); setToken(response.access_token); const permissions = await api.menus(response.access_token); setUser(response.user); applyPermissions(permissions); setAuthError(""); }
   function logout() { sessionStorage.removeItem("access_token"); setToken(null); setUser(null); setMenus([]); setMenuItems([]); setAuthError(""); }
   if (!user) return <LoginPanel error={authError} onLogin={async (...args) => { try { await login(...args); } catch (err) { setAuthError(err.message); throw err; } }} />;
-  const content = page === "dashboard" ? <DashboardPage token={token} menus={menus} onNavigate={navigate} /> : page === "create_job" ? <CreateJobForm token={token} onCreated={() => {}} /> : page === "scheduled_jobs" ? <ScheduledJobsPage token={token} onNavigate={navigate} /> : page === "task_management" ? <TaskManagementPage token={token} /> : <GeneratedFilesPage token={token} />;
+  const configuredItem = menuItems.find((item) => item.id === page);
+  const content = page === "dashboard" ? <DashboardPage token={token} menus={menus} onNavigate={navigate} /> : page === "create_job" ? <CreateJobForm token={token} onCreated={() => {}} /> : page === "scheduled_jobs" ? <ScheduledJobsPage token={token} onNavigate={navigate} /> : page === "task_management" ? <TaskManagementPage token={token} /> : page === "generated_files" ? <GeneratedFilesPage token={token} /> : <ConfiguredMenuPage item={configuredItem} />;
   return <AppLayout user={user} menus={menus} menuItems={menuItems} page={page} setPage={navigate} onLogout={logout}>{content}</AppLayout>;
 }

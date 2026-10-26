@@ -1,72 +1,27 @@
-# Menu access is granted when the signed-in user's directory group matches one
-# of the groups below. Group matching is case-insensitive and accepts either a
-# plain CN (for example, "Domain Admins") or a full LDAP distinguished name.
-#
-# The GR_DEMO_* groups are local mock identities used by AUTH_MODE=mock:
-#   demo_admin  -> GR_DEMO_ADMINS (all menus)
-#   demo_viewer -> GR_DEMO_VIEWERS (limited menus)
+# Menu policy for AUTH_MODE=ldap.
+# A menu is shown only when the authenticated directory user belongs to one of
+# the configured groups. Full LDAP DNs are supported; matching is case-insensitive.
 menus:
   - id: dashboard
     label: Dashboard
     path: /dashboard
     groups:
       - domain admins
-      - enterprise admins
-      - gr_demo_admins
-      - gr_demo_viewers
-      - gr_demo_report_authors
-      - gr_demo_operators
-      - gr_demo_auditors
-      - gr_demo_schedulers
-      - gr_demo_finance
-      - gr_demo_sales
-      - gr_demo_support
-      - gr_demo_compliance
 
-  - id: create_job
-    label: Create Job
-    path: /create-job
+  - id: csv-report-generator
+    label: CSV Report Generator
+    path: /reports/csv
+    groups:
+      - enterprise admins
+
+  - id: audit-log-report
+    label: Audit Log Report
+    path: /reports/audit-log
+    groups:
+      - test123
+
+  - id: payroll-report
+    label: Payroll Report
+    path: /reports/payroll
     groups:
       - domain admins
-      - enterprise admins
-      - gr_demo_admins
-      - gr_demo_report_authors
-      - gr_demo_finance
-      - gr_demo_sales
-
-  - id: scheduled_jobs
-    label: Scheduled Jobs
-    path: /scheduled-jobs
-    groups:
-      - domain admins
-      - enterprise admins
-      - gr_demo_admins
-      - gr_demo_report_authors
-      - gr_demo_operators
-      - gr_demo_schedulers
-
-  - id: task_management
-    label: Task Management
-    path: /task-management
-    groups:
-      - domain admins
-      - enterprise admins
-      - gr_demo_admins
-      - gr_demo_operators
-      - gr_demo_auditors
-      - gr_demo_support
-      - gr_demo_compliance
-
-  - id: generated_files
-    label: Generated Files
-    path: /generated-files
-    groups:
-      - domain admins
-      - enterprise admins
-      - gr_demo_admins
-      - gr_demo_operators
-      - gr_demo_auditors
-      - gr_demo_viewers
-      - gr_demo_finance
-      - gr_demo_sales
-      - gr_demo_compliance

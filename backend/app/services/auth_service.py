@@ -7,7 +7,7 @@ from app.config.settings import Settings, get_settings
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.services.ldap_service import LdapService
-from app.config.menu_config import get_menu_config
+from app.config.menu_config import get_ldap_menu_config
 from app.utils.auth_exceptions import AuthorizationDeniedError, InvalidCredentialsError, LoginRateLimitedError
 
 
@@ -85,7 +85,7 @@ class AuthService:
         groups = profile.pop("groups", None) or []
         self.authorizer.check(groups)
         profile["permissions"] = self.authorizer.permissions(groups)
-        menus = get_menu_config().menus_for_groups(groups)
+        menus = get_ldap_menu_config().menus_for_groups(groups)
         user = self.repository.upsert_from_ldap(db, profile)
         self.limiter.clear(key)
         return user, menus, groups

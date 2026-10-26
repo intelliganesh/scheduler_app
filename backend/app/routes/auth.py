@@ -46,11 +46,13 @@ def me(
 @router.get("/menus")
 def menus(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
     claims = get_token_claims(credentials)
-    from app.config.menu_config import get_menu_config
+    from app.config.menu_config import get_ldap_menu_config, get_mock_menu_config
+    from app.config.settings import get_settings
 
     groups = claims.get("groups", [])
+    menu_config = get_mock_menu_config() if get_settings().auth_mode == "mock" else get_ldap_menu_config()
     return {
         "menus": claims.get("menus", []),
-        "menu_items": get_menu_config().items_for_groups(groups),
+        "menu_items": menu_config.items_for_groups(groups),
         "groups": groups,
     }

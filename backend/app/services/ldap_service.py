@@ -57,7 +57,11 @@ class LdapService:
 
     @property
     def uses_ntlm_session_encryption(self) -> bool:
-        return self.auth_method == "NTLM" and self.settings.ldap_ntlm_session_encryption and ntlm_session_encryption_supported()
+        # Only without TLS: AD rejects NTLM sealing inside an LDAPS/StartTLS connection.
+        settings = self.settings
+        if settings.ldap_use_ssl or settings.ldap_start_tls:
+            return False
+        return self.auth_method == "NTLM" and settings.ldap_ntlm_session_encryption and ntlm_session_encryption_supported()
 
     def canonical_username(self, username: str) -> str:
         """Returns the sAMAccountName for `user`, `AGILE\\user` or `user@agile.local`."""

@@ -1,6 +1,6 @@
 from app.utils.auth_exceptions import InvalidCredentialsError
 from app.config.settings import get_settings
-from app.config.menu_config import get_menu_config
+from app.config.menu_config import get_mock_menu_config
 
 MOCK_USERS = {
     "demo_admin": {"password": "DemoAdmin!2026", "full_name": "Demo Administrator", "email": "demo_admin@example.local", "groups": ["GR_DEMO_ADMINS"]},
@@ -11,7 +11,7 @@ MOCK_USERS = {
 # Backward-compatible export for integrations that imported the old demo map.
 # The YAML policy remains the single source of truth.
 SAMPLE_GROUP_MENUS = {
-    group: get_menu_config().menus_for_groups([group])
+    group: get_mock_menu_config().menus_for_groups([group])
     for group in {group for user in MOCK_USERS.values() for group in user["groups"]}
 }
 
@@ -25,7 +25,7 @@ if get_settings().mock_testexpert_password:
 
 
 def menus_for_groups(groups: list[str]) -> list[str]:
-    return get_menu_config().menus_for_groups(groups)
+    return get_mock_menu_config().menus_for_groups(groups)
 
 
 class MockAuthService:

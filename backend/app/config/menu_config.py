@@ -42,8 +42,8 @@ class MenuConfig:
 
 
 @lru_cache
-def get_menu_config() -> MenuConfig:
-    path = Path(__file__).with_name("menu.yaml")
+def _load_menu_config(filename: str) -> MenuConfig:
+    path = Path(__file__).with_name(filename)
     if not path.is_file():
         raise ValueError(f"Menu configuration file is missing: {path}")
     try:
@@ -60,3 +60,18 @@ def get_menu_config() -> MenuConfig:
         if not isinstance(item.get("groups"), list) or not all(isinstance(group, str) and group.strip() for group in item["groups"]):
             raise ValueError(f"Each menu must define a non-empty list of group names: {path}")
     return MenuConfig(menus)
+
+
+def get_menu_config() -> MenuConfig:
+    """Return the legacy mock policy for backwards-compatible integrations."""
+    return _load_menu_config("mock_menu.yaml")
+
+
+def get_ldap_menu_config() -> MenuConfig:
+    """Load the menu policy used for real LDAP/Active Directory logins."""
+    return _load_menu_config("menu.yaml")
+
+
+def get_mock_menu_config() -> MenuConfig:
+    """Load the local demo/mock authentication menu policy."""
+    return _load_menu_config("mock_menu.yaml")
