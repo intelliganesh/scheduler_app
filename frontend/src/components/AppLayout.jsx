@@ -1,0 +1,9 @@
+import { useState } from "react";
+
+const icons = { dashboard: "▦", create_job: "+", scheduled_jobs: "◷", task_management: "✓", generated_files: "⇩" };
+const labels = { dashboard: "Dashboard", create_job: "Create Job", scheduled_jobs: "Scheduled Jobs", task_management: "Task Management", generated_files: "Generated Files" };
+
+export default function AppLayout({ user, menus, menuItems, page, setPage, onLogout, children }) {
+  const [collapsed, setCollapsed] = useState(false); const initials = (user.full_name || user.username || "U").split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(); const configured = menuItems?.length ? menuItems : Object.keys(labels).map((id) => ({ id, label: labels[id], path: `/${id}` })); const allowed = configured.filter((item) => menus.includes(item.id)); const labelMap = Object.fromEntries(configured.map((item) => [item.id, item.label]));
+  return <div className={`app-shell ${collapsed ? "sidebar-collapsed" : ""}`}><aside className="sidebar"><nav className="sidebar-nav">{allowed.map((item) => <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)} title={item.label}><span className="nav-icon">{icons[item.id] || "•"}</span><span>{item.label}</span></button>)}</nav><button className="collapse-button" onClick={() => setCollapsed(!collapsed)}>{collapsed ? "→" : "←"} <span>Collapse</span></button></aside><div className="main-shell"><header className="topbar"><div><p className="breadcrumb"><span>{labelMap[page] || labels[page] || "Dashboard"}</span></p><h1>{labelMap[page] || labels[page] || "Dashboard"}</h1></div><div className="user-menu"><span className="avatar">{initials}</span><div><strong>{user.full_name || user.username}</strong><small>{user.email || user.username}</small></div><button className="text-button" onClick={onLogout}>Log out</button></div></header><main className="workspace">{children}</main></div></div>;
+}

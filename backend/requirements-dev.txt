@@ -1,0 +1,3 @@
+-r requirements.txt
+# Test-only: required by fastapi.testclient.
+httpx>=0.27,<1.0
