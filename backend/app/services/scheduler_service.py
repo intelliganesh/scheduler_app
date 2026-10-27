@@ -2,6 +2,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.database.session import SessionLocal
 from app.models.workflow import ReportJob
@@ -22,7 +23,14 @@ class SchedulerService:
         if not job.enabled:
             self.scheduler.remove_job(job_id) if self.scheduler.get_job(job_id) else None; return
         if job.recurrence == "once":
-            self.scheduler.add_job(self._run, DateTrigger(run_date=job.schedule_at, timezone=ZoneInfo("Asia/Kolkata")), args=[job.id], id=job_id, replace_existing=True, max_instances=1)
+            self.scheduler.add_job(self._run, DateTrigger(run_date=job.schedule_at, timezone=ZoneInfo("Asia/Kolkata")), args=[job.id], id=job_id, replace_existing=True, max_instances=1, misfire_grace_time=300)
+            job.next_run_at = job.schedule_at
+            return
+        if job.recurrence.startswith("hourly_"):
+            hours = int(job.recurrence.split("_", 1)[1])
+            trigger = IntervalTrigger(hours=hours, start_date=job.schedule_at, timezone=ZoneInfo("Asia/Kolkata"))
+            self.scheduler.add_job(self._run, trigger, args=[job.id], id=job_id, replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=300)
+            job.next_run_at = self.scheduler.get_job(job_id).next_run_time
             return
         hour, minute = map(int, job.schedule_time.split(":"))
         args = {"hour": hour, "minute": minute, "timezone": ZoneInfo("Asia/Kolkata")}
@@ -31,9 +39,19 @@ class SchedulerService:
         trigger = CronTrigger(**args)
         self.scheduler.add_job(self._run, trigger, args=[job.id], id=job_id, replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=300)
         job.next_run_at = self.scheduler.get_job(job_id).next_run_time
+    def remove_all_report_jobs(self):
+        for scheduled in list(self.scheduler.get_jobs()):
+            if scheduled.id.startswith("report-job-"):
+                self.scheduler.remove_job(scheduled.id)
     def _run(self, job_id):
         db = SessionLocal()
-        try: WorkflowService().run_job(db, job_id)
+        try:
+            WorkflowService().run_job(db, job_id)
+            job = db.get(ReportJob, job_id)
+            if job:
+                scheduled = self.scheduler.get_job(f"report-job-{job_id}")
+                job.next_run_at = None if job.recurrence == "once" else (scheduled.next_run_time if scheduled else None)
+                db.commit()
         except Exception: pass
         finally: db.close()
 

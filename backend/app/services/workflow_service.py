@@ -2,8 +2,9 @@ import csv
 import io
 import json
 import re
+import zipfile
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,9 +14,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config.settings import get_settings
-from app.models.workflow import Company, Employee, GeneratedFile, JobRun, Payroll, ReportJob, SampleSale, UploadedQuery
+from app.models.workflow import Client, ClientEmail, Company, Employee, GeneratedFile, JobRun, Payroll, ReportJob, SampleSale, UploadedQuery
 from app.repositories.workflow_repository import WorkflowRepository
-from app.schemas.workflow import JobCreate
+from app.schemas.workflow import EMAIL_PATTERN, JobCreate
 
 APPROVED_PROCEDURES = {
     "mapped_employee_payroll_report": "Mapped Employee Payroll Report",
@@ -28,6 +29,7 @@ APPROVED_PROCEDURES = {
 MAPPING_FIELDS = (
     "employee_code", "employee_name", "department", "designation", "payroll_month",
     "basic_salary", "allowances", "deductions", "net_salary", "payment_status",
+    "company_name", "employee_count", "net_salary_total", "paydate",
 )
 MAPPING_PROCEDURE = "mapped_employee_payroll_report"
 LEGACY_PROCEDURES = {"sales_by_company": "dbo.usp_SalesByCompany", "monthly_sales_summary": "dbo.usp_MonthlySalesSummary", "product_sales_report": "dbo.usp_ProductSalesReport"}
@@ -49,6 +51,16 @@ class WorkflowService:
                     db.add(SampleSale(company_id=company.id, product_name=product, quantity=index * 4, amount=float(index * 125.5), sale_date=now))
             db.commit()
         self.seed_payroll(db, companies)
+        self.seed_clients(db, companies)
+
+    def seed_clients(self, db: Session, companies: list[Company]) -> None:
+        if db.query(Client).count(): return
+        for company in companies:
+            for index in range(1, 4):
+                client = Client(company_id=company.id, client_code=f"CLIENT{company.id:02d}{index:03d}", client_name=f"{company.company_name} Client {index}")
+                db.add(client); db.flush()
+                db.add_all([ClientEmail(client_id=client.id, email=f"finance{index}@company{company.id}.example"), ClientEmail(client_id=client.id, email=f"payroll{index}@company{company.id}.example")])
+        db.commit()
 
     def seed_payroll(self, db: Session, companies: list[Company]) -> None:
         if db.query(Employee).count(): return
@@ -106,7 +118,19 @@ class WorkflowService:
             if "record type" not in header or "column name" not in header:
                 raise ValueError("Excel file must contain 'record type' and 'column name' columns.")
             name_index = header.index("column name")
-            names = [str(row[name_index]).strip() for row in rows if len(row) > name_index and row[name_index] is not None and str(row[name_index]).strip()]
+            record_type_index = header.index("record type")
+            columns = []
+            for row in rows:
+                if len(row) <= name_index or row[name_index] is None:
+                    continue
+                name = str(row[name_index]).strip()
+                if not name:
+                    continue
+                raw_record_type = row[record_type_index] if len(row) > record_type_index else None
+                record_type = str(raw_record_type or "D").strip().upper()
+                if record_type not in {"H", "D", "T"}:
+                    raise ValueError("Excel record type must be H, D, or T.")
+                columns.append({"column_name": name, "record_type": record_type})
         except ValueError:
             raise
         except Exception as exc:
@@ -114,10 +138,11 @@ class WorkflowService:
         finally:
             try: workbook.close()
             except UnboundLocalError: pass
+        names = [item["column_name"] for item in columns]
         self._validate_mapping_names(names, "Excel")
         folder = Path(settings.uploads_dir); folder.mkdir(parents=True, exist_ok=True)
         stored_name = f"{uuid4().hex}{Path(original_name).suffix.lower()}"; (folder / stored_name).write_bytes(content)
-        record = UploadedQuery(original_name=original_name, stored_name=stored_name, approved_key=MAPPING_PROCEDURE, column_names=json.dumps(names, ensure_ascii=False))
+        record = UploadedQuery(original_name=original_name, stored_name=stored_name, approved_key=MAPPING_PROCEDURE, column_names=json.dumps(columns, ensure_ascii=False))
         db.add(record); db.commit(); db.refresh(record); return record
 
     @staticmethod
@@ -129,6 +154,24 @@ class WorkflowService:
 
     def create_job(self, db: Session, payload: JobCreate) -> ReportJob:
         if db.get(Company, payload.company_id) is None: raise ValueError("Company not found.")
+        client_selections = {}
+        for raw_client_id, email_ids in payload.client_selections.items():
+            try: client_id = int(raw_client_id)
+            except (TypeError, ValueError) as exc: raise ValueError("Client selection is invalid.") from exc
+            if db.get(Company, client_id) is None: raise ValueError("Every selected client must be a valid company ID.")
+            normalized_emails = []
+            seen_emails = set()
+            for raw_email in email_ids:
+                email = str(raw_email).strip()
+                # Numeric values are accepted only for compatibility with older
+                # jobs that stored ClientEmail IDs. New jobs store manual emails.
+                if not email.isdigit() and not EMAIL_PATTERN.fullmatch(email):
+                    raise ValueError(f"Invalid email address: {email or '(empty)'}")
+                key = email.casefold()
+                if key in seen_emails:
+                    raise ValueError("Company email recipients must be unique.")
+                seen_emails.add(key); normalized_emails.append(email)
+            client_selections[str(client_id)] = normalized_emails
         if payload.source_type == "procedure" and payload.source_key not in APPROVED_PROCEDURES: raise ValueError("Choose an approved stored procedure.")
         if payload.source_type == "txt" and not payload.uploaded_query_id: raise ValueError("Choose an approved TXT upload.")
         mappings = payload.column_mappings or []
@@ -136,18 +179,55 @@ class WorkflowService:
             upload = self.repository.uploaded(db, payload.uploaded_query_id) if payload.uploaded_query_id else None
             if not upload or upload.approved_key != MAPPING_PROCEDURE:
                 raise ValueError("Upload a valid TXT column list for the mapped payroll procedure.")
-            names = json.loads(upload.column_names or "[]")
-            if [item.display_name for item in mappings] != names:
-                raise ValueError("Every TXT column must be mapped in its original order.")
-            if any(item.database_field not in MAPPING_FIELDS for item in mappings):
+            uploaded_columns = json.loads(upload.column_names or "[]")
+            expected_names = [item.get("column_name", "") if isinstance(item, dict) else item for item in uploaded_columns]
+            if [item.column_name for item in mappings] != expected_names:
+                raise ValueError("Every upload column must be mapped in its original order.")
+            if any(item.db_column_name not in MAPPING_FIELDS for item in mappings):
                 raise ValueError("Choose fields from the approved payroll field list.")
         elif mappings or payload.uploaded_query_id:
             raise ValueError("TXT mappings are supported only by the mapped payroll procedure.")
-        values = payload.model_dump(exclude={"column_mappings"})
+        values = payload.model_dump(exclude={"column_mappings", "schedule_type", "weekly_day", "monthly_day"})
         values["recipients"] = json.dumps(payload.recipients, ensure_ascii=False) if payload.recipients else None
-        values["column_mappings"] = json.dumps([item.model_dump() for item in mappings], ensure_ascii=False) if mappings else None
-        values["schedule_time"] = payload.schedule_at.strftime("%H:%M"); values["recurrence"] = "once"; values["next_run_at"] = payload.schedule_at
+        values["client_selections"] = json.dumps(client_selections, ensure_ascii=False) if client_selections else None
+        values["column_mappings"] = json.dumps([item.model_dump(exclude_none=True) for item in mappings], ensure_ascii=False) if mappings else None
+        recurrence = {"one_time": "once", "hourly_1": "hourly_1", "hourly_2": "hourly_2", "hourly_4": "hourly_4", "daily": "daily", "weekly": "weekly", "monthly": "monthly"}[payload.schedule_type]
+        if payload.schedule_type == "weekly" and payload.weekly_day is None: raise ValueError("Choose a day of the week for weekly schedules.")
+        if payload.schedule_type == "monthly" and payload.monthly_day is None: raise ValueError("Choose a day of the month for monthly schedules.")
+        values["schedule_time"] = payload.schedule_at.strftime("%H:%M"); values["recurrence"] = recurrence; values["day_of_week"] = payload.weekly_day; values["day_of_month"] = payload.monthly_day; values["next_run_at"] = payload.schedule_at
         job = ReportJob(**values); db.add(job); db.commit(); db.refresh(job); return job
+
+    def deletion_summary(self, db: Session) -> dict[str, int]:
+        jobs = db.query(ReportJob).all()
+        job_ids = [job.id for job in jobs]
+        run_count = db.query(JobRun).filter(JobRun.job_id.in_(job_ids)).count() if job_ids else 0
+        file_count = db.query(GeneratedFile).filter(GeneratedFile.job_id.in_(job_ids)).count() if job_ids else 0
+        upload_ids = {job.uploaded_query_id for job in jobs if job.uploaded_query_id}
+        return {"jobs": len(jobs), "runs": run_count, "generated_files": file_count, "uploads": len(upload_ids)}
+
+    def delete_all_jobs_and_files(self, db: Session) -> dict[str, int]:
+        jobs = db.query(ReportJob).all()
+        job_ids = [job.id for job in jobs]
+        upload_ids = {job.uploaded_query_id for job in jobs if job.uploaded_query_id}
+        files = db.query(GeneratedFile).filter(GeneratedFile.job_id.in_(job_ids)).all() if job_ids else []
+        runs = db.query(JobRun).filter(JobRun.job_id.in_(job_ids)).all() if job_ids else []
+        uploads = db.query(UploadedQuery).filter(UploadedQuery.id.in_(upload_ids)).all() if upload_ids else []
+        generated_root = Path(get_settings().generated_reports_dir).resolve()
+        upload_root = Path(get_settings().uploads_dir).resolve()
+        for record in files:
+            path = Path(record.storage_path).resolve()
+            if path.is_file() and generated_root in path.parents:
+                path.unlink()
+        for record in uploads:
+            path = (upload_root / Path(record.stored_name).name).resolve()
+            if path.is_file() and upload_root in path.parents:
+                path.unlink()
+        for record in files: db.delete(record)
+        for record in runs: db.delete(record)
+        for record in jobs: db.delete(record)
+        for record in uploads: db.delete(record)
+        db.commit()
+        return {"jobs": len(jobs), "runs": len(runs), "generated_files": len(files), "uploads": len(uploads)}
 
     def set_enabled(self, db: Session, job_id: int, enabled: bool) -> ReportJob:
         job = self.repository.job(db, job_id)
@@ -166,11 +246,16 @@ class WorkflowService:
         if not is_new and run.status == "Running": raise ValueError("This run is already active.")
         run.status = "Running"; run.error_message = None
         try:
-            if not run.csv_content:
-                rows, headers = self._execute_source(db, job)
+            if not run.csv_content and not run.output_manifest:
+                if job.export_split_by and job.export_split_by != "file_name":
+                    split_outputs = self._execute_split_source(db, job)
+                    run.output_manifest = json.dumps([{"name": name, "content": content, "rows": row_count} for name, content, row_count in split_outputs], ensure_ascii=False)
+                    run.csv_content = split_outputs[0][1] if split_outputs else ""
+                else:
+                    rows, headers = self._execute_source(db, job)
+                    run.csv_content = self._csv_records(rows, job.delimiter or ",") if headers is None else self._csv(headers, rows, job.delimiter or ",")
                 self._log(run, "SQL execution", "Completed")
                 run.current_step = "CSV generation"
-                run.csv_content = self._csv(headers, rows)
                 self._log(run, "CSV generation", "Completed")
             run.current_step = "File storage"
             generated = self._store_file(db, job, run)
@@ -186,21 +271,40 @@ class WorkflowService:
         dialect = db.bind.dialect.name
         if job.source_key == MAPPING_PROCEDURE:
             mappings = json.loads(job.column_mappings or "[]")
-            if dialect == "mssql":
+            # Normalize mappings saved by older versions and the new four-column UI.
+            normalized = []
+            for item in mappings:
+                column_name = item.get("column_name") or item.get("display_name")
+                database_field = item.get("db_column_name") or item.get("database_field")
+                normalized.append({**item, "column_name": column_name, "display_name": item.get("display_name") or column_name, "db_column_name": database_field, "database_field": database_field, "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text"})
+            mappings = normalized
+            selected_company_ids = self._selected_company_ids(job)
+            if dialect == "mssql" and not selected_company_ids and not self._requires_application_mapping(mappings):
                 result = db.execute(text("EXEC dbo.usp_GenerateMappedPayrollReport @company_id=:company_id, @column_mappings=:column_mappings"), {"company_id": job.company_id, "column_mappings": json.dumps(mappings, ensure_ascii=False)})
             else:
-                expressions = {
-                    "employee_code": "e.employee_code", "employee_name": "e.employee_name", "department": "e.department",
-                    "designation": "e.designation", "payroll_month": "p.payroll_month", "basic_salary": "p.basic_salary",
-                    "allowances": "p.allowances", "deductions": "p.deductions", "net_salary": "p.net_salary", "payment_status": "p.payment_status",
-                }
-                select_list = ", ".join(f'{expressions[item["database_field"]]} AS "{item["display_name"].replace(chr(34), chr(34) * 2)}"' for item in mappings)
-                result = db.execute(text(f"SELECT {select_list} FROM employees e JOIN payroll p ON p.employee_id=e.id WHERE e.company_id=:company_id ORDER BY e.employee_code, p.payroll_month DESC"), {"company_id": job.company_id})
+                return self._execute_application_mapping(db, job, mappings)
             rows = result.fetchmany(get_settings().max_report_rows)
             return [tuple(row) for row in rows], list(result.keys())
         if job.source_type == "procedure" and dialect == "mssql":
             names = {"employee_payroll_report": "dbo.usp_EmployeePayrollReport", "monthly_payroll_summary": "dbo.usp_MonthlyPayrollSummary", "department_payroll_report": "dbo.usp_DepartmentPayrollReport", "employee_salary_breakdown": "dbo.usp_EmployeeSalaryBreakdown", "company_payroll_report": "dbo.usp_CompanyPayrollReport", **LEGACY_PROCEDURES}
-            result = db.execute(text(f"EXEC {names[job.source_key]} @company_id=:company_id"), {"company_id": job.company_id})
+            procedure_name = names[job.source_key]
+            if job.source_key == "company_payroll_report":
+                # This legacy procedure is parameterless. Execute it as-is,
+                # then apply the selected, verified company IDs to its
+                # company_name column in the application layer.
+                result = db.execute(text(f"EXEC {procedure_name}"))
+                rows = [tuple(row) for row in result.fetchmany(get_settings().max_report_rows)]
+                selected_ids = self._selected_company_ids(job) or [job.company_id]
+                companies = db.query(Company).filter(Company.id.in_(selected_ids)).all()
+                if len(companies) != len(set(selected_ids)) or len({company.company_name for company in companies}) != len(companies):
+                    raise ValueError("Selected company identities could not be verified for stored-procedure filtering.")
+                allowed_names = {company.company_name for company in companies}
+                # usp_CompanyPayrollReport returns RECTYPE at index 1 and the
+                # unique company_name at index 2. Keep all H/D/T rows for the
+                # selected companies and preserve the procedure's ordering.
+                rows = [row for row in rows if len(row) > 2 and row[2] in allowed_names]
+                return rows, list(result.keys())
+            result = db.execute(text(f"EXEC {procedure_name} @company_id=:company_id"), {"company_id": job.company_id})
         elif job.source_type == "procedure" and job.source_key in APPROVED_PROCEDURES:
             result = db.execute(text(APPROVED_TXT_QUERY), {"company_id": job.company_id})
         elif job.source_type == "txt":
@@ -215,17 +319,155 @@ class WorkflowService:
         if existing: return existing
         company = db.get(Company, job.company_id)
         folder = Path(get_settings().generated_reports_dir); folder.mkdir(parents=True, exist_ok=True)
+        if run.output_manifest:
+            manifest = json.loads(run.output_manifest)
+            stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+            # Split archives may contain several companies; avoid naming the
+            # archive after only the primary company shown on the job record.
+            job_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", (job.title or "payroll_export").strip()).strip("_").lower() or "payroll_export"
+            archive_name = f"{job_slug}_{job.id}_run_{run.id}_{stamp}.zip"
+            archive_path = folder / archive_name
+            total_rows = 0
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for item in manifest:
+                    archive.writestr(item["name"], item["content"])
+                    total_rows += item.get("rows", 0)
+            generated = GeneratedFile(run_id=run.id, job_id=job.id, company_id=job.company_id, file_name=archive_name, storage_path=str(archive_path.resolve()), row_count=total_rows, file_size=archive_path.stat().st_size)
+            db.add(generated); return generated
         filename = f"{company.company_name.lower().replace(' ', '_')}_{job.id}_run_{run.id}_{datetime.now():%Y%m%d_%H%M%S}.csv"
         path = folder / filename; path.write_text(run.csv_content or "", encoding="utf-8", newline="")
-        generated = GeneratedFile(run_id=run.id, job_id=job.id, company_id=job.company_id, file_name=filename, storage_path=str(path.resolve()), row_count=max(0, len((run.csv_content or "").splitlines()) - 1), file_size=path.stat().st_size)
+        row_count = self._generated_detail_row_count(job, run.csv_content or "")
+        generated = GeneratedFile(run_id=run.id, job_id=job.id, company_id=job.company_id, file_name=filename, storage_path=str(path.resolve()), row_count=row_count, file_size=path.stat().st_size)
         db.add(generated); return generated
+
+    def _generated_detail_row_count(self, job: ReportJob, content: str) -> int:
+        """Return D-record count for H/D/T output, legacy header-row count otherwise."""
+        mappings = json.loads(job.column_mappings or "[]") if job.column_mappings else []
+        record_types = [str(item.get("record_type") or "D").upper() for item in mappings if isinstance(item, dict)]
+        if "H" not in record_types and "T" not in record_types:
+            return max(0, len(content.splitlines()) - 1)
+        delimiter = job.delimiter if job.delimiter in {",", "|", ";", "\t"} else ","
+        physical_rows = list(csv.reader(io.StringIO(content), delimiter=delimiter))
+        return max(0, len(physical_rows) - (1 if "H" in record_types else 0) - (1 if "T" in record_types else 0))
+
+    def _execute_split_source(self, db: Session, job: ReportJob):
+        if job.source_key != MAPPING_PROCEDURE:
+            raise ValueError("Export splitting is supported for the mapped payroll report only.")
+        raw_rows, mappings = self._query_application_rows(db, job)
+        groups = {}
+        for row in raw_rows:
+            # Pay Date exports are kept separate per selected company and pay
+            # date so a company's report is never mixed with another company's
+            # records that happen to share the same payroll month.
+            key = row["__client_id"] if job.export_split_by == "client_id" else (row["__client_id"], row["__pay_date"])
+            groups.setdefault(key, []).append(row)
+        outputs = []
+        for key, rows in groups.items():
+            if job.export_split_by == "client_id":
+                safe_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(key))
+                filename = f"client_{safe_key}_{job.id}.csv"
+            else:
+                client_id, pay_date = key
+                safe_date = re.sub(r"[^A-Za-z0-9_-]+", "_", str(pay_date))
+                filename = f"client_{client_id}_paydate_{safe_date}_{job.id}.csv"
+            if any(item["record_type"] in {"H", "T"} for item in mappings):
+                content = self._csv_records(self._build_htd_records(mappings, rows), job.delimiter or ",")
+            else:
+                headers = [item["display_name"] for item in mappings]
+                detail_rows = [tuple(row.get(f"__{item['database_field']}") for item in mappings) for row in rows]
+                content = self._csv(headers, detail_rows, job.delimiter or ",")
+            outputs.append((filename, content, len(rows)))
+        return outputs
+
+    @staticmethod
+    def _requires_application_mapping(mappings):
+        procedure_fields = {"employee_code", "employee_name", "department", "designation", "payroll_month", "basic_salary", "allowances", "deductions", "net_salary", "payment_status"}
+        return any(item.get("record_type", "D") != "D" or (item.get("database_field") or item.get("db_column_name")) not in procedure_fields for item in mappings)
+
+    def _query_application_rows(self, db: Session, job: ReportJob):
+        mappings = json.loads(job.column_mappings or "[]")
+        normalized = []
+        for item in mappings:
+            field = item.get("database_field") or item.get("db_column_name")
+            if field not in MAPPING_FIELDS: raise ValueError("Choose fields from the approved payroll field list.")
+            normalized.append({"display_name": item.get("display_name") or item.get("column_name"), "database_field": field, "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text"})
+        expressions = {
+            "employee_code": "e.employee_code", "employee_name": "e.employee_name", "department": "e.department", "designation": "e.designation",
+            "payroll_month": "p.payroll_month", "paydate": "e.paydate", "basic_salary": "p.basic_salary", "allowances": "p.allowances", "deductions": "p.deductions",
+            "net_salary": "p.net_salary", "payment_status": "p.payment_status", "company_name": "c.company_name",
+        }
+        selected_fields = {item["database_field"] for item in normalized if item["database_field"] in expressions}
+        if "net_salary_total" in {item["database_field"] for item in normalized}:
+            selected_fields.add("net_salary")
+        # Pay Date splitting uses the employee-level test field when present.
+        # Payroll-period reporting remains available separately through the
+        # payroll_month mapping field.
+        select_parts = ["e.company_id AS __client_id", "e.paydate AS __pay_date"]
+        for field in selected_fields:
+            select_parts.append(f'{expressions[field]} AS "__{field}"')
+        ids = self._selected_company_ids(job) or [job.company_id]
+        result = db.execute(text(f"SELECT {', '.join(select_parts)} FROM employees e JOIN companies c ON c.id=e.company_id JOIN payroll p ON p.employee_id=e.id WHERE e.company_id IN ({','.join(str(int(value)) for value in ids)}) ORDER BY e.company_id, p.payroll_month, e.employee_code"))
+        rows = [dict(row._mapping) for row in result.fetchmany(get_settings().max_report_rows)]
+        return rows, normalized
+
+    def _execute_application_mapping(self, db: Session, job: ReportJob, mappings):
+        rows, normalized = self._query_application_rows(db, job)
+        if self._requires_application_mapping(mappings):
+            return self._build_htd_records(normalized, rows), None
+        headers = [item["display_name"] for item in normalized]
+        return [tuple(row.get(f"__{item['database_field']}") for item in normalized) for row in rows], headers
+
+    def _build_htd_records(self, mappings, rows):
+        if not rows: return []
+        records = []
+        for record_type in ("H", "D", "T"):
+            selected = [item for item in mappings if item["record_type"] == record_type]
+            if not selected: continue
+            source_rows = rows if record_type == "D" else [rows[0]]
+            if record_type == "T": source_rows = [rows[0]]
+            for source in source_rows:
+                values = []
+                for item in selected:
+                    field = item["database_field"]
+                    if field == "employee_count": value = len(rows)
+                    elif field == "net_salary_total": value = sum((Decimal(str(r.get("__net_salary") or 0)) for r in rows), Decimal("0"))
+                    elif field == "company_name" and len({r.get("__client_id") for r in rows}) > 1: value = "Multiple Companies"
+                    else: value = source.get(f"__{field}")
+                    values.append(self._format_value(value, item["format"]))
+                records.append(values)
+        return records
+
+    def _csv_records(self, records, delimiter):
+        delimiter = delimiter if delimiter in {",", "|", ";", "\t"} else ","
+        output = io.StringIO(); writer = csv.writer(output, delimiter=delimiter)
+        writer.writerows([[self._safe(value) for value in row] for row in records]); return output.getvalue()
+
+    @staticmethod
+    def _format_value(value, format_name):
+        if value is None: return ""
+        if format_name in {"Date", "DateDMY", "DateMDY"} and isinstance(value, (datetime, date)):
+            return value.strftime({"Date": "%Y-%m-%d", "DateDMY": "%d-%m-%Y", "DateMDY": "%m/%d/%Y"}[format_name])
+        if format_name in {"PhoneDash", "PhoneParens"}:
+            digits = re.sub(r"\D", "", str(value))
+            if len(digits) == 10:
+                return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if format_name == "PhoneDash" else f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+        return str(value)
+
+    @staticmethod
+    def _selected_company_ids(job: ReportJob) -> list[int]:
+        try:
+            selections = json.loads(job.client_selections or "{}")
+            return sorted({int(value) for value in selections})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
 
     @staticmethod
     def _normalize(query: str) -> str: return re.sub(r"\s+", " ", query.strip()).lower()
     @staticmethod
     def _safe(value): return "'" + value if isinstance(value, str) and value[:1] in ("=", "+", "-", "@") else value
-    def _csv(self, headers, rows):
-        output = io.StringIO(); writer = csv.writer(output); writer.writerow(headers); writer.writerows([[self._safe(v) for v in row] for row in rows]); return output.getvalue()
+    def _csv(self, headers, rows, delimiter=","):
+        delimiter = delimiter if delimiter in {",", "|", ";", "\t"} else ","
+        output = io.StringIO(); writer = csv.writer(output, delimiter=delimiter); writer.writerow(headers); writer.writerows([[self._safe(v) for v in row] for row in rows]); return output.getvalue()
     @staticmethod
     def _log(run, step, state):
         history = json.loads(run.step_log or "[]"); history.append({"step": step, "status": state, "at": datetime.now().isoformat()}); run.step_log = json.dumps(history)

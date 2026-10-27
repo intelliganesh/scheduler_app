@@ -2,6 +2,8 @@ from datetime import datetime
 import json
 import re
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.config.settings import get_settings
@@ -42,9 +44,65 @@ def normalize_recipients(value) -> list[str]:
     return recipients
 
 
+def normalize_client_selections(value) -> dict[str, list[str]]:
+    """Normalize per-company manual emails while accepting legacy numeric IDs."""
+    if value is None or value == "":
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Client selections must be an object keyed by company ID.")
+    selections: dict[str, list[str]] = {}
+    for raw_company_id, raw_values in value.items():
+        try:
+            company_id = str(int(raw_company_id))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Client selection is invalid.") from exc
+        if raw_values is None:
+            raw_values = []
+        if not isinstance(raw_values, list):
+            raise ValueError("Each company must have a list of email addresses.")
+        if len(raw_values) > get_settings().max_email_recipients:
+            raise ValueError(f"You can add at most {get_settings().max_email_recipients} email recipients per company.")
+        emails: list[str] = []
+        seen: set[str] = set()
+        for raw_email in raw_values:
+            if not isinstance(raw_email, (str, int)):
+                raise ValueError("Company email recipients must be strings.")
+            email = str(raw_email).strip()
+            # Numeric values are retained only for compatibility with earlier
+            # jobs that stored ClientEmail IDs; new UI values are email strings.
+            if not email.isdigit() and not EMAIL_PATTERN.fullmatch(email):
+                raise ValueError(f"Invalid email address: {email or '(empty)'}")
+            key = email.casefold()
+            if key in seen:
+                raise ValueError("Company email recipients must be unique.")
+            seen.add(key)
+            emails.append(email)
+        selections[company_id] = emails
+    return selections
+
+
 class ColumnMapping(BaseModel):
-    display_name: str = Field(min_length=1, max_length=160)
-    database_field: str = Field(min_length=1, max_length=80)
+    # display_name/database_field are retained for compatibility with existing jobs
+    # and the SQL Server mapped-report procedure. New clients may use the clearer
+    # column_name/db_column_name names instead.
+    display_name: str | None = Field(default=None, max_length=160)
+    database_field: str | None = Field(default=None, max_length=80)
+    column_name: str | None = Field(default=None, max_length=160)
+    db_column_name: str | None = Field(default=None, max_length=80)
+    record_type: Literal["H", "D", "T"] = "D"
+    format: Literal["Text", "TextPhone", "PhoneDash", "PhoneParens", "Date", "DateDMY", "DateMDY"] = "Text"
+
+    @model_validator(mode="after")
+    def normalize_mapping(self):
+        column_name = (self.column_name or self.display_name or "").strip()
+        db_column_name = (self.db_column_name or self.database_field or "").strip()
+        if not column_name or not db_column_name:
+            raise ValueError("Each mapping needs a column name and database field.")
+        object.__setattr__(self, "column_name", column_name)
+        object.__setattr__(self, "display_name", self.display_name or column_name)
+        object.__setattr__(self, "db_column_name", db_column_name)
+        object.__setattr__(self, "database_field", self.database_field or db_column_name)
+        return self
 
 
 class ProcedureRead(BaseModel):
@@ -64,6 +122,12 @@ class JobCreate(BaseModel):
     schedule_at: datetime
     recipients: list[str] = Field(default_factory=list)
     column_mappings: list[ColumnMapping] | None = None
+    delimiter: Literal[",", "|", ";", "\t"] = ","
+    client_selections: dict[str, list[str]] = Field(default_factory=dict)
+    export_split_by: Literal["file_name", "client_id", "pay_date"] = "file_name"
+    schedule_type: Literal["one_time", "hourly_1", "hourly_2", "hourly_4", "daily", "weekly", "monthly"] = "one_time"
+    weekly_day: int | None = Field(default=None, ge=0, le=6)
+    monthly_day: int | None = Field(default=None, ge=1, le=31)
     enabled: bool = True
 
     @field_validator("source_type")
@@ -78,12 +142,17 @@ class JobCreate(BaseModel):
     def validate_recipients(cls, value):
         return normalize_recipients(value)
 
+    @field_validator("client_selections", mode="before")
+    @classmethod
+    def validate_client_selections(cls, value):
+        return normalize_client_selections(value)
+
     @model_validator(mode="after")
     def validate_mapping(self):
         if self.column_mappings:
-            if len({item.display_name.casefold() for item in self.column_mappings}) != len(self.column_mappings):
+            if len({item.column_name.casefold() for item in self.column_mappings}) != len(self.column_mappings):
                 raise ValueError("TXT column names must be unique.")
-            if len({item.database_field for item in self.column_mappings}) != len(self.column_mappings):
+            if len({item.db_column_name for item in self.column_mappings}) != len(self.column_mappings):
                 raise ValueError("Database fields must be mapped one-to-one.")
         return self
 
@@ -99,6 +168,10 @@ class JobRead(BaseModel):
     source_key: str | None
     uploaded_query_id: int | None
     column_mappings: str | None
+    delimiter: str | None
+    client_selections: dict[str, list[str]] = Field(default_factory=dict)
+    export_split_by: str | None
+    schedule_type: str
     schedule_time: str
     schedule_at: datetime | None
     recurrence: str
@@ -114,6 +187,16 @@ class JobRead(BaseModel):
     @classmethod
     def validate_existing_recipients(cls, value):
         return normalize_recipients(value)
+
+    @field_validator("client_selections", mode="before")
+    @classmethod
+    def normalize_client_selections(cls, value):
+        if value is None or value == "": return {}
+        if isinstance(value, str):
+            try: value = json.loads(value)
+            except json.JSONDecodeError: return {}
+        if not isinstance(value, dict): return {}
+        return {str(client_id): [str(email_id) for email_id in (email_ids or [])] for client_id, email_ids in value.items()}
 
 
 

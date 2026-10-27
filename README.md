@@ -226,6 +226,7 @@ npm run dev
 - Upload TXT column names: `POST http://localhost:8000/api/uploads/query` (multipart field `file`)
 - Create and schedule a one-time job: `POST http://localhost:8000/api/jobs`
 - Generated files: `GET http://localhost:8000/api/files` and `GET /api/files/{id}/download`
+- Deletion Center: `GET /api/deletion-center` and `DELETE /api/deletion-center` (admin-only; requires typing `DELETE ALL` in the UI)
 
 Example request body:
 
@@ -248,11 +249,12 @@ With `AUTH_MODE=mock` in the process environment (for example, `AUTH_MODE=mock .
 
 Mock passwords are development-only values in `backend/app/services/mock_auth_service.py`; do not use them in production. The Create Job page uses one form with the five job fields: Job Name, Schedule Date & Time, Company, Email Recipients, and Stored Procedure. Email Recipients are optional; enter an address and press Enter or comma, or paste a comma-separated list. Addresses are trimmed, validated, deduplicated case-insensitively, and stored as a JSON array in the existing `report_jobs.recipients` text column. The limit is configurable with `MAX_EMAIL_RECIPIENTS` (default 10). Removing a chip updates the list; no SMTP delivery is performed. Selecting **Mapped Employee Payroll Report** reveals the TXT upload and mapping section. The **Create & Schedule Job** button creates a one-time job; schedules use Asia/Kolkata and run while the backend is running. The legacy TXT query upload remains available through the separate `/api/uploads/query` endpoint.
 
-The mapping flow accepts either a UTF-8 `.txt` file with one output column name per line or an `.xlsx`/`.xlsm` workbook containing `record type` and `column name` columns. A ready-to-upload example is `samples/mapped_payroll_columns.xlsx`. Map every extracted name to an approved database field using drag-and-drop or the searchable selectors, create a future job, wait for the scheduler, then inspect `/api/runs` and `/api/files`. The backend persists the ordered names and mapping JSON on the job and passes both `@company_id` and `@column_mappings` to SQL Server's `dbo.usp_GenerateMappedPayrollReport`. The procedure validates the allowlist and returns only the requested fields in the requested order; uploaded files are never executed as SQL.
+The mapping flow accepts either a UTF-8 `.txt` file with one output column name per line or an `.xlsx`/`.xlsm` workbook containing `record type` and `column name` columns. A ready-to-upload example is `samples/mapped_payroll_columns.xlsx`. Excel uploads retain the H/D/T record type and the New Job form displays a four-column mapping table: Column Name, Record Type, DB Column Name, and Format (Text, TextPhone, or Date). Record Type can be adjusted with its H/D/T dropdown. The form also provides a Select Delimiter dropdown (Comma, Pipe, Semicolon, or Tab); comma is the default for new and legacy jobs. Map every extracted name to an approved database field using the searchable selectors, choose formats as needed, create a future job, wait for the scheduler, then inspect `/api/runs` and `/api/files`. The backend persists the ordered names, delimiter, and mapping JSON on the job and passes both `@company_id` and `@column_mappings` to SQL Server's `dbo.usp_GenerateMappedPayrollReport`. Legacy `display_name`/`database_field` mappings remain compatible; uploaded files are never executed as SQL.
 
 ### Admin dashboard
 
 After signing in, the React application presents only the authorized areas in a responsive sidebar. LDAP/Active Directory authorization uses `backend/app/config/menu.yaml`, while local mock authentication uses `backend/app/config/mock_menu.yaml`. Each menu has an id, label, path, and groups; LDAP group claims (including full `CN=...,DC=...` distinguished names) are normalized and compared case-insensitively. The standard policy exposes Dashboard, Jobs, and Generated Files to authorized users. Only menus whose configured group matches the authentication response are returned. The API returns both menu ids and display metadata from `/api/auth/menus`; backend route guards use the ids in the signed token, so hiding a menu does not replace server-side authorization. Jobs is a unified screen for creating, scheduling, monitoring, and reviewing execution history. Dashboard metrics and tables are loaded from the FastAPI workflow endpoints; no dashboard counts are hard-coded. Tables support horizontal scrolling on small screens, and the sidebar collapses to an icon rail on mobile.
+The admin-only Deletion Center removes application-created report jobs, their execution runs, generated-file metadata/files, and associated uploaded column-list files. It never removes companies, employees, payroll data, users, permissions, or configuration. The UI shows a count preview and requires typing `DELETE ALL` plus a confirmation prompt.
 
 ## Local workflow demonstration
 
@@ -274,3 +276,13 @@ With the configured SQL Server reachable and migrations applied, also run the li
 cd backend
 RUN_SQLSERVER_TESTS=1 .venv/bin/python -m unittest discover -s tests
 ```
+
+### Client and email selections
+
+The New Job form uses the existing `companies` list as the Client list because Company and Client are the same business entity. Multiple companies/clients can be selected with a searchable chip selector; each selected company ID has its own email-ID selector. The saved `client_selections` JSON maps real company IDs to selected email IDs; legacy `recipients` values remain supported.
+
+Export Split By supports **File Name**, **Client ID**, and **Pay Date** for mapped payroll jobs. Client ID uses the selected company's real `companies.id` and the `employees.company_id → payroll.employee_id` relationship. Pay Date uses the employee-level `employees.paydate` field; each selected company and pay date produces its own CSV member. Payroll-period data remains available through the `payroll_month` mapping field. Split runs create separate delimiter-aware CSV members and expose them as one downloadable ZIP. The original approved company procedure remains unchanged.
+
+Mapped Excel configurations may assign columns to H (Header), D (Detail), or T (Trailer). The application emits those records in H → D → T order and derives trailer employee counts and net salary totals from the actual detail rows. Existing all-detail mappings retain the prior CSV header-row behavior.
+
+Jobs support One Time, Every 1/2/4 Hours, Daily, Weekly, and Monthly schedules. Recurring schedules use Asia/Kolkata time, APScheduler interval/cron triggers, one active instance, coalesced missed runs, and a five-minute misfire grace period. Weekly uses the selected weekday and Monthly uses the selected day of month.

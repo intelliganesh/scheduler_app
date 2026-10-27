@@ -1,11 +1,15 @@
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.workflow import Company, GeneratedFile, JobRun, ReportJob, SampleSale, UploadedQuery
+from app.models.workflow import Client, ClientEmail, Company, GeneratedFile, JobRun, ReportJob, SampleSale, UploadedQuery
 
 
 class WorkflowRepository:
     def companies(self, db: Session): return list(db.scalars(select(Company).order_by(Company.company_name)))
+    def clients(self, db: Session, company_id: int): return list(db.scalars(select(Client).where(Client.company_id == company_id).order_by(Client.client_name)))
+    def client_emails(self, db: Session, client_id: int): return list(db.scalars(select(ClientEmail).where(ClientEmail.client_id == client_id).order_by(ClientEmail.email)))
+    def company_emails(self, db: Session, company_id: int):
+        return list(db.scalars(select(ClientEmail).join(Client, ClientEmail.client_id == Client.id).where(Client.company_id == company_id).order_by(ClientEmail.email)))
     def jobs(self, db: Session): return list(db.scalars(select(ReportJob).order_by(ReportJob.id.desc())))
     def job(self, db: Session, job_id: int): return db.get(ReportJob, job_id)
     def run(self, db: Session, run_id: int): return db.get(JobRun, run_id)

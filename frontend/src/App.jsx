@@ -8,6 +8,7 @@ import TaskManagementPage from "./pages/TaskManagementPage";
 import GeneratedFilesPage from "./pages/GeneratedFilesPage";
 import ConfiguredMenuPage from "./pages/ConfiguredMenuPage";
 import JobsPage from "./pages/JobsPage";
+import DeletionCenterPage from "./pages/DeletionCenterPage";
 import { api } from "./services/api";
 
 export default function App() {
@@ -16,12 +17,13 @@ export default function App() {
     const allowedMenus = permissions.menus || []; const items = permissions.menu_items || [];
     setMenus(allowedMenus); setMenuItems(items);
     const fromUrl = items.find((item) => item.path === window.location.pathname)?.id;
-    const nextPage = fromUrl && allowedMenus.includes(fromUrl) ? fromUrl : (allowedMenus.includes("dashboard") ? "dashboard" : allowedMenus[0]);
+    const nextPage = window.location.pathname === "/jobs/new" && allowedMenus.includes("jobs") ? "jobs_new" : (fromUrl && allowedMenus.includes(fromUrl) ? fromUrl : (allowedMenus.includes("dashboard") ? "dashboard" : allowedMenus[0]));
     setPage(nextPage);
     const nextItem = items.find((item) => item.id === nextPage);
-    if (nextItem?.path && window.location.pathname !== nextItem.path) window.history.replaceState({}, "", nextItem.path);
+    if (nextPage !== "jobs_new" && nextItem?.path && window.location.pathname !== nextItem.path) window.history.replaceState({}, "", nextItem.path);
   }
   function navigate(nextPage) {
+    if (nextPage === "jobs_new") { setPage(nextPage); window.history.pushState({}, "", "/jobs/new"); return; }
     if (!menus.includes(nextPage)) return;
     setPage(nextPage);
     const item = menuItems.find((candidate) => candidate.id === nextPage);
@@ -29,6 +31,7 @@ export default function App() {
   }
   useEffect(() => {
     function onPopState() {
+      if (window.location.pathname === "/jobs/new") { setPage("jobs_new"); return; }
       const item = menuItems.find((candidate) => candidate.path === window.location.pathname);
       if (item && menus.includes(item.id)) setPage(item.id);
     }
@@ -39,6 +42,6 @@ export default function App() {
   function logout() { sessionStorage.removeItem("access_token"); setToken(null); setUser(null); setMenus([]); setMenuItems([]); setAuthError(""); window.history.replaceState({}, "", "/"); }
   if (!user) return <LoginPanel error={authError} onLogin={async (...args) => { try { await login(...args); } catch (err) { setAuthError(err.message); throw err; } }} />;
   const configuredItem = menuItems.find((item) => item.id === page);
-  const content = page === "dashboard" ? <DashboardPage token={token} menus={menus} onNavigate={navigate} /> : page === "jobs" ? <JobsPage token={token} /> : page === "create_job" ? <CreateJobForm token={token} onCreated={() => {}} /> : page === "scheduled_jobs" ? <ScheduledJobsPage token={token} onNavigate={navigate} /> : page === "task_management" ? <TaskManagementPage token={token} /> : page === "generated_files" ? <GeneratedFilesPage token={token} /> : <ConfiguredMenuPage item={configuredItem} />;
+  const content = page === "dashboard" ? <DashboardPage token={token} menus={menus} onNavigate={navigate} /> : page === "jobs" ? <JobsPage token={token} onNavigate={navigate} /> : page === "jobs_new" ? <CreateJobForm token={token} onCreated={() => navigate("jobs")} onCancel={() => navigate("jobs")} /> : page === "create_job" ? <CreateJobForm token={token} onCreated={() => navigate("jobs")} onCancel={() => navigate("jobs")} /> : page === "scheduled_jobs" ? <ScheduledJobsPage token={token} onNavigate={navigate} /> : page === "task_management" ? <TaskManagementPage token={token} /> : page === "generated_files" ? <GeneratedFilesPage token={token} /> : page === "deletion_center" ? <DeletionCenterPage token={token} /> : <ConfiguredMenuPage item={configuredItem} />;
   return <AppLayout user={user} menus={menus} menuItems={menuItems} page={page} setPage={navigate} onLogout={logout}>{content}</AppLayout>;
 }

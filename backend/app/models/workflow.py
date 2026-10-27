@@ -13,6 +13,21 @@ class Company(Base):
     company_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
 
 
+class Client(Base):
+    __tablename__ = "clients"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    client_code: Mapped[str] = mapped_column(String(80), index=True)
+    client_name: Mapped[str] = mapped_column(Unicode(160))
+
+
+class ClientEmail(Base):
+    __tablename__ = "client_emails"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
+    email: Mapped[str] = mapped_column(String(255))
+
+
 class SampleSale(Base):
     __tablename__ = "sample_sales"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -31,6 +46,9 @@ class Employee(Base):
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
     department: Mapped[str] = mapped_column(Unicode(100))
     designation: Mapped[str] = mapped_column(Unicode(120))
+    # Optional employee-level pay date used by local export-testing scenarios.
+    # Payroll-period data remains authoritative in payroll.payroll_month.
+    paydate: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
@@ -67,16 +85,25 @@ class ReportJob(Base):
     source_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     uploaded_query_id: Mapped[int | None] = mapped_column(ForeignKey("uploaded_queries.id"), nullable=True)
     column_mappings: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delimiter: Mapped[str | None] = mapped_column(String(1), nullable=True)
     schedule_time: Mapped[str] = mapped_column(String(5))  # HH:MM, Asia/Kolkata
     schedule_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     recurrence: Mapped[str] = mapped_column(String(12))
     day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
     day_of_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recipients: Mapped[str | None] = mapped_column(Text, nullable=True)
+    client_selections: Mapped[str | None] = mapped_column(Text, nullable=True)
+    export_split_by: Mapped[str | None] = mapped_column(String(20), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_run_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    @property
+    def schedule_type(self) -> str:
+        if self.recurrence == "once": return "one_time"
+        if self.recurrence.startswith("hourly_"): return self.recurrence
+        return self.recurrence
 
 
 class JobRun(Base):
@@ -88,6 +115,7 @@ class JobRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     step_log: Mapped[str] = mapped_column(Text, default="[]")
     csv_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_manifest: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

@@ -17,3 +17,9 @@ menus:
     path: /generated-files
     groups:
       - domain admins
+
+  - id: deletion_center
+    label: Deletion Center
+    path: /deletion-center
+    groups:
+      - domain admins

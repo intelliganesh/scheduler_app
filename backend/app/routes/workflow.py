@@ -33,6 +33,12 @@ def authorize(menu: str):
 def dashboard(db=Depends(get_db), _: None = Depends(authorize("dashboard"))): return controller.stats(db)
 @router.get("/companies")
 def companies(db=Depends(get_db), _: None = Depends(authorize("jobs"))): return controller.companies(db)
+@router.get("/companies/{company_id}/clients")
+def clients(company_id: int, db=Depends(get_db), _: None = Depends(authorize("jobs"))): return controller.clients(db, company_id)
+@router.get("/clients/{client_id}/emails")
+def client_emails(client_id: int, db=Depends(get_db), _: None = Depends(authorize("jobs"))): return controller.client_emails(db, client_id)
+@router.get("/companies/{company_id}/emails")
+def company_emails(company_id: int, db=Depends(get_db), _: None = Depends(authorize("jobs"))): return controller.company_emails(db, company_id)
 @router.get("/approved-procedures")
 def procedures(_: None = Depends(authorize("jobs"))): return controller.procedures()
 @router.post("/uploads/query")
@@ -69,8 +75,16 @@ def retry(run_id: int, db=Depends(get_db), _: None = Depends(authorize("jobs")))
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 @router.get("/files")
 def files(db=Depends(get_db), _: None = Depends(authorize("generated_files"))): return controller.files(db)
+@router.get("/deletion-center")
+def deletion_summary(db=Depends(get_db), _: None = Depends(authorize("deletion_center"))): return controller.deletion_summary(db)
+@router.delete("/deletion-center")
+def delete_all_jobs_and_files(db=Depends(get_db), _: None = Depends(authorize("deletion_center"))):
+    from app.services.scheduler_service import get_scheduler
+    get_scheduler().remove_all_report_jobs()
+    return controller.delete_all_jobs_and_files(db)
 @router.get("/files/{file_id}/download")
 def download(file_id: int, db=Depends(get_db), _: None = Depends(authorize("generated_files"))):
     record = controller.service.repository.file(db, file_id)
     if not record or not Path(record.storage_path).is_file(): raise HTTPException(status_code=404, detail="Generated file is unavailable.")
-    return FileResponse(record.storage_path, filename=record.file_name, media_type="text/csv")
+    media_type = "application/zip" if record.file_name.lower().endswith(".zip") else "text/csv"
+    return FileResponse(record.storage_path, filename=record.file_name, media_type=media_type)

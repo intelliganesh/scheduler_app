@@ -36,3 +36,9 @@ menus:
       - gr_demo_finance
       - gr_demo_sales
       - gr_demo_compliance
+
+  - id: deletion_center
+    label: Deletion Center
+    path: /deletion-center
+    groups:
+      - gr_demo_admins

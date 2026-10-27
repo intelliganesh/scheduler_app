@@ -6,6 +6,9 @@ from app.services.scheduler_service import get_scheduler
 class WorkflowController:
     def __init__(self, service=None): self.service = service or WorkflowService()
     def companies(self, db): return self.service.repository.companies(db)
+    def clients(self, db, company_id): return self.service.repository.clients(db, company_id)
+    def client_emails(self, db, client_id): return self.service.repository.client_emails(db, client_id)
+    def company_emails(self, db, company_id): return self.service.repository.company_emails(db, company_id)
     def jobs(self, db): return self.service.repository.jobs(db)
     def stats(self, db):
         data = self.service.repository.stats(db); data["recent_runs"] = self.service.repository.runs(db)[:10]; return data
@@ -20,5 +23,7 @@ class WorkflowController:
     def upload(self, db, name, content): return self.service.create_upload(db, name, content)
     def enable(self, db, job_id, enabled): return self.service.set_enabled(db, job_id, enabled)
     def run(self, db, job_id, retry_run_id=None): return self.service.run_job(db, job_id, retry_run_id)
+    def deletion_summary(self, db): return self.service.deletion_summary(db)
+    def delete_all_jobs_and_files(self, db): return self.service.delete_all_jobs_and_files(db)
     def runs(self, db, failed_before=None): return self.service.repository.runs(db, failed_before)
     def files(self, db): return self.service.repository.files(db)
