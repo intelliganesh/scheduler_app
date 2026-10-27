@@ -13,7 +13,9 @@ controller = ReportController()
 
 def authorize_report(menu: str):
     def dependency(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
-        if menu not in get_token_claims(credentials).get("menus", []):
+        granted = set(get_token_claims(credentials).get("menus", []))
+        aliases = {"jobs", "create_job", "scheduled_jobs", "task_management"} if menu == "jobs" else {menu}
+        if not granted.intersection(aliases):
             raise HTTPException(status_code=403, detail="You are not authorized for this menu.")
     return dependency
 
@@ -24,5 +26,5 @@ def list_reports(db: Session = Depends(get_db), _: None = Depends(authorize_repo
 
 
 @router.post("", response_model=ReportRead, status_code=status.HTTP_201_CREATED)
-def create_report(payload: ReportCreate, db: Session = Depends(get_db), _: None = Depends(authorize_report("create_job"))):
+def create_report(payload: ReportCreate, db: Session = Depends(get_db), _: None = Depends(authorize_report("jobs"))):
     return controller.create_report(db, payload)

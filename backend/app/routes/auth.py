@@ -51,8 +51,11 @@ def menus(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_sche
 
     groups = claims.get("groups", [])
     menu_config = get_mock_menu_config() if get_settings().auth_mode == "mock" else get_ldap_menu_config()
+    allowed_menus = menu_config.menus_for_groups(groups)
     return {
-        "menus": claims.get("menus", []),
+        # Re-evaluate against the active policy so a token issued under an old
+        # menu configuration cannot keep showing removed or unauthorized items.
+        "menus": allowed_menus,
         "menu_items": menu_config.items_for_groups(groups),
         "groups": groups,
     }

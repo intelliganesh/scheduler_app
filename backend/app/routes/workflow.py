@@ -14,43 +14,53 @@ router = APIRouter(tags=["workflow"])
 controller = WorkflowController()
 
 
+MENU_ALIASES = {
+    # Tokens issued before the Jobs consolidation may still contain these
+    # legacy claims until they expire. They remain authorization aliases only;
+    # they are not displayed as sidebar items.
+    "jobs": {"jobs", "create_job", "scheduled_jobs", "task_management"},
+}
+
+
 def authorize(menu: str):
     def dependency(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
-        if menu not in get_token_claims(credentials).get("menus", []): raise HTTPException(status_code=403, detail="You are not authorized for this menu.")
+        granted = set(get_token_claims(credentials).get("menus", []))
+        if not granted.intersection(MENU_ALIASES.get(menu, {menu})):
+            raise HTTPException(status_code=403, detail="You are not authorized for this menu.")
     return dependency
 
 @router.get("/dashboard")
 def dashboard(db=Depends(get_db), _: None = Depends(authorize("dashboard"))): return controller.stats(db)
 @router.get("/companies")
-def companies(db=Depends(get_db), _: None = Depends(authorize("create_job"))): return controller.companies(db)
+def companies(db=Depends(get_db), _: None = Depends(authorize("jobs"))): return controller.companies(db)
 @router.get("/approved-procedures")
-def procedures(_: None = Depends(authorize("create_job"))): return controller.procedures()
+def procedures(_: None = Depends(authorize("jobs"))): return controller.procedures()
 @router.post("/uploads/query")
-async def upload_query(file: UploadFile = File(...), db=Depends(get_db), _: None = Depends(authorize("create_job"))):
+async def upload_query(file: UploadFile = File(...), db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     try: return controller.upload(db, file.filename or "query.txt", await file.read())
     except ValueError as exc: raise HTTPException(status_code=422, detail=str(exc)) from exc
 @router.get("/jobs", response_model=list[JobRead])
-def jobs(db=Depends(get_db), _: None = Depends(authorize("scheduled_jobs"))): return controller.jobs(db)
+def jobs(db=Depends(get_db), _: None = Depends(authorize("jobs"))): return controller.jobs(db)
 @router.post("/jobs", response_model=JobRead)
-def create_job(payload: JobCreate, db=Depends(get_db), _: None = Depends(authorize("create_job"))):
+def create_job(payload: JobCreate, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     try: return controller.create_job(db, payload)
     except ValueError as exc: raise HTTPException(status_code=422, detail=str(exc)) from exc
 @router.post("/jobs/{job_id}/enabled", response_model=JobRead)
-def enabled(job_id: int, enabled: bool, db=Depends(get_db), _: None = Depends(authorize("scheduled_jobs"))):
+def enabled(job_id: int, enabled: bool, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     try:
         return controller.enable(db, job_id, enabled)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 @router.post("/jobs/{job_id}/run")
-def run(job_id: int, db=Depends(get_db), _: None = Depends(authorize("scheduled_jobs"))):
+def run(job_id: int, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     try:
         return controller.run(db, job_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 @router.get("/runs")
-def runs(failed_before: datetime | None = None, db=Depends(get_db), _: None = Depends(authorize("task_management"))): return controller.runs(db, failed_before)
+def runs(failed_before: datetime | None = None, db=Depends(get_db), _: None = Depends(authorize("jobs"))): return controller.runs(db, failed_before)
 @router.post("/runs/{run_id}/retry")
-def retry(run_id: int, db=Depends(get_db), _: None = Depends(authorize("task_management"))):
+def retry(run_id: int, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     record = controller.service.repository.run(db, run_id)
     if not record: raise HTTPException(status_code=404, detail="Run not found.")
     try:

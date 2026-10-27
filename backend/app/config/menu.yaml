@@ -1,6 +1,4 @@
 # Menu policy for AUTH_MODE=ldap.
-# A menu is shown only when the authenticated directory user belongs to one of
-# the configured groups. Full LDAP DNs are supported; matching is case-insensitive.
 menus:
   - id: dashboard
     label: Dashboard
@@ -8,20 +6,14 @@ menus:
     groups:
       - domain admins
 
-  - id: csv-report-generator
-    label: CSV Report Generator
-    path: /reports/csv
+  - id: jobs
+    label: Jobs
+    path: /jobs
     groups:
-      - enterprise admins
+      - domain admins
 
-  - id: audit-log-report
-    label: Audit Log Report
-    path: /reports/audit-log
-    groups:
-      - test123
-
-  - id: payroll-report
-    label: Payroll Report
-    path: /reports/payroll
+  - id: generated_files
+    label: Generated Files
+    path: /generated-files
     groups:
       - domain admins

@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from openpyxl import load_workbook
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -67,8 +69,11 @@ class WorkflowService:
 
     def create_upload(self, db: Session, original_name: str, content: bytes) -> UploadedQuery:
         settings = get_settings()
-        if not original_name.lower().endswith(".txt") or len(content) > settings.max_upload_bytes:
-            raise ValueError("Upload must be a TXT file within the configured size limit.")
+        extension = Path(original_name).suffix.lower()
+        if extension not in {".txt", ".xlsx", ".xlsm"} or len(content) > settings.max_upload_bytes:
+            raise ValueError("Upload must be a TXT or Excel file within the configured size limit.")
+        if extension in {".xlsx", ".xlsm"}:
+            return self._create_excel_column_upload(db, original_name, content, settings)
         try:
             query = content.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
@@ -92,6 +97,35 @@ class WorkflowService:
         stored_name = f"{uuid4().hex}.txt"; (folder / stored_name).write_text("\n".join(names) + "\n", encoding="utf-8")
         record = UploadedQuery(original_name=original_name, stored_name=stored_name, approved_key=MAPPING_PROCEDURE, column_names=json.dumps(names, ensure_ascii=False))
         db.add(record); db.commit(); db.refresh(record); return record
+
+    def _create_excel_column_upload(self, db: Session, original_name: str, content: bytes, settings) -> UploadedQuery:
+        try:
+            workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            rows = workbook.active.iter_rows(values_only=True)
+            header = [str(value or "").strip().casefold() for value in next(rows, ())]
+            if "record type" not in header or "column name" not in header:
+                raise ValueError("Excel file must contain 'record type' and 'column name' columns.")
+            name_index = header.index("column name")
+            names = [str(row[name_index]).strip() for row in rows if len(row) > name_index and row[name_index] is not None and str(row[name_index]).strip()]
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Excel file could not be read. Upload a valid .xlsx workbook.") from exc
+        finally:
+            try: workbook.close()
+            except UnboundLocalError: pass
+        self._validate_mapping_names(names, "Excel")
+        folder = Path(settings.uploads_dir); folder.mkdir(parents=True, exist_ok=True)
+        stored_name = f"{uuid4().hex}{Path(original_name).suffix.lower()}"; (folder / stored_name).write_bytes(content)
+        record = UploadedQuery(original_name=original_name, stored_name=stored_name, approved_key=MAPPING_PROCEDURE, column_names=json.dumps(names, ensure_ascii=False))
+        db.add(record); db.commit(); db.refresh(record); return record
+
+    @staticmethod
+    def _validate_mapping_names(names: list[str], source_label: str) -> None:
+        if not names: raise ValueError(f"{source_label} must contain at least one column name.")
+        if len(names) > len(MAPPING_FIELDS): raise ValueError(f"{source_label} contains too many columns for the approved payroll report.")
+        if any(len(name) > 160 or any(ord(char) < 32 for char in name) for name in names): raise ValueError(f"{source_label} column names contain invalid characters or are too long.")
+        if len({name.casefold() for name in names}) != len(names): raise ValueError(f"{source_label} column names must be unique.")
 
     def create_job(self, db: Session, payload: JobCreate) -> ReportJob:
         if db.get(Company, payload.company_id) is None: raise ValueError("Company not found.")
