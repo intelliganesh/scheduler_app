@@ -20,3 +20,4 @@ frontend/.env
 prompts.md
 generated_reports/
 backend/uploads/
+logs/

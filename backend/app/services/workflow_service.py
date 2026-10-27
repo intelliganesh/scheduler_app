@@ -138,21 +138,21 @@ class WorkflowService:
         finally:
             try: workbook.close()
             except UnboundLocalError: pass
-        names = [item["column_name"] for item in columns]
-        self._validate_mapping_names(names, "Excel")
+        self._validate_mapping_names(columns, "Excel")
         folder = Path(settings.uploads_dir); folder.mkdir(parents=True, exist_ok=True)
         stored_name = f"{uuid4().hex}{Path(original_name).suffix.lower()}"; (folder / stored_name).write_bytes(content)
         record = UploadedQuery(original_name=original_name, stored_name=stored_name, approved_key=MAPPING_PROCEDURE, column_names=json.dumps(columns, ensure_ascii=False))
         db.add(record); db.commit(); db.refresh(record); return record
 
     @staticmethod
-    def _validate_mapping_names(names: list[str], source_label: str) -> None:
-        if not names: raise ValueError(f"{source_label} must contain at least one column name.")
-        if len(names) > len(MAPPING_FIELDS): raise ValueError(f"{source_label} contains too many columns for the approved payroll report.")
-        if any(len(name) > 160 or any(ord(char) < 32 for char in name) for name in names): raise ValueError(f"{source_label} column names contain invalid characters or are too long.")
-        if len({name.casefold() for name in names}) != len(names): raise ValueError(f"{source_label} column names must be unique.")
+    def _validate_mapping_names(columns: list[dict], source_label: str) -> None:
+        if not columns: raise ValueError(f"{source_label} must contain at least one column name.")
+        if len(columns) > len(MAPPING_FIELDS): raise ValueError(f"{source_label} contains too many columns for the approved payroll report.")
+        if any(len(item["column_name"]) > 160 or any(ord(char) < 32 for char in item["column_name"]) for item in columns): raise ValueError(f"{source_label} column names contain invalid characters or are too long.")
+        keys = [(item.get("record_type", "D").upper(), item["column_name"].casefold()) for item in columns]
+        if len(set(keys)) != len(keys): raise ValueError(f"{source_label} column names must be unique within each record type.")
 
-    def create_job(self, db: Session, payload: JobCreate) -> ReportJob:
+    def _job_values(self, db: Session, payload: JobCreate) -> dict:
         if db.get(Company, payload.company_id) is None: raise ValueError("Company not found.")
         client_selections = {}
         for raw_client_id, email_ids in payload.client_selections.items():
@@ -183,19 +183,35 @@ class WorkflowService:
             expected_names = [item.get("column_name", "") if isinstance(item, dict) else item for item in uploaded_columns]
             if [item.column_name for item in mappings] != expected_names:
                 raise ValueError("Every upload column must be mapped in its original order.")
-            if any(item.db_column_name not in MAPPING_FIELDS for item in mappings):
+            if any(field and field not in MAPPING_FIELDS for item in mappings for field in (item.db_column_name if isinstance(item.db_column_name, list) else [item.db_column_name])):
                 raise ValueError("Choose fields from the approved payroll field list.")
         elif mappings or payload.uploaded_query_id:
             raise ValueError("TXT mappings are supported only by the mapped payroll procedure.")
-        values = payload.model_dump(exclude={"column_mappings", "schedule_type", "weekly_day", "monthly_day"})
+        values = payload.model_dump(exclude={"column_mappings", "schedule_type", "weekly_day", "monthly_day", "sort_field", "sort_direction", "filter_field", "filter_operator", "filter_value", "sort_rules", "filter_rules"})
         values["recipients"] = json.dumps(payload.recipients, ensure_ascii=False) if payload.recipients else None
         values["client_selections"] = json.dumps(client_selections, ensure_ascii=False) if client_selections else None
         values["column_mappings"] = json.dumps([item.model_dump(exclude_none=True) for item in mappings], ensure_ascii=False) if mappings else None
-        recurrence = {"one_time": "once", "hourly_1": "hourly_1", "hourly_2": "hourly_2", "hourly_4": "hourly_4", "daily": "daily", "weekly": "weekly", "monthly": "monthly"}[payload.schedule_type]
+        sort_rules = payload.sort_rules or ([{"field": payload.sort_field, "direction": payload.sort_direction}] if payload.sort_field else [])
+        filter_rules = payload.filter_rules or ([{"field": payload.filter_field, "operator": payload.filter_operator, "value": str(payload.filter_value)}] if payload.filter_field and payload.filter_value is not None else [])
+        values["report_options"] = json.dumps({"sort_rules": sort_rules, "filter_rules": filter_rules, "sort_field": payload.sort_field, "sort_direction": payload.sort_direction, "filter_field": payload.filter_field, "filter_operator": payload.filter_operator, "filter_value": str(payload.filter_value) if payload.filter_value is not None else None}, ensure_ascii=False)
+        recurrence = {"one_time": "once", "every_2_minutes": "every_2_minutes", "hourly_1": "hourly_1", "hourly_2": "hourly_2", "hourly_4": "hourly_4", "daily": "daily", "weekly": "weekly", "monthly": "monthly"}[payload.schedule_type]
         if payload.schedule_type == "weekly" and payload.weekly_day is None: raise ValueError("Choose a day of the week for weekly schedules.")
         if payload.schedule_type == "monthly" and payload.monthly_day is None: raise ValueError("Choose a day of the month for monthly schedules.")
         values["schedule_time"] = payload.schedule_at.strftime("%H:%M"); values["recurrence"] = recurrence; values["day_of_week"] = payload.weekly_day; values["day_of_month"] = payload.monthly_day; values["next_run_at"] = payload.schedule_at
+        return values
+
+    def create_job(self, db: Session, payload: JobCreate) -> ReportJob:
+        values = self._job_values(db, payload)
         job = ReportJob(**values); db.add(job); db.commit(); db.refresh(job); return job
+
+    def update_job(self, db: Session, job_id: int, payload: JobCreate) -> ReportJob:
+        job = self.repository.job(db, job_id)
+        if not job: raise ValueError("Job not found.")
+        values = self._job_values(db, payload)
+        for key, value in values.items():
+            if key not in {"id", "created_at"}:
+                setattr(job, key, value)
+        db.commit(); db.refresh(job); return job
 
     def deletion_summary(self, db: Session) -> dict[str, int]:
         jobs = db.query(ReportJob).all()
@@ -237,6 +253,8 @@ class WorkflowService:
     def run_job(self, db: Session, job_id: int, retry_run_id: int | None = None) -> JobRun:
         job = self.repository.job(db, job_id)
         if not job: raise ValueError("Job not found.")
+        if not job.enabled and retry_run_id is None:
+            raise ValueError("Job is disabled. Enable it before running.")
         run = self.repository.run(db, retry_run_id) if retry_run_id else None
         if run and run.status not in {"Failed", "Partially Completed"}: raise ValueError("Only failed runs can be retried.")
         is_new = run is None
@@ -276,6 +294,7 @@ class WorkflowService:
             for item in mappings:
                 column_name = item.get("column_name") or item.get("display_name")
                 database_field = item.get("db_column_name") or item.get("database_field")
+                database_fields = database_field if isinstance(database_field, list) else [database_field]
                 normalized.append({**item, "column_name": column_name, "display_name": item.get("display_name") or column_name, "db_column_name": database_field, "database_field": database_field, "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text"})
             mappings = normalized
             selected_company_ids = self._selected_company_ids(job)
@@ -359,11 +378,11 @@ class WorkflowService:
             # Pay Date exports are kept separate per selected company and pay
             # date so a company's report is never mixed with another company's
             # records that happen to share the same payroll month.
-            key = row["__client_id"] if job.export_split_by == "client_id" else (row["__client_id"], row["__pay_date"])
+            key = row["__client_id"] if job.export_split_by in {"client_id", "file_client"} else (row["__client_id"], row["__pay_date"])
             groups.setdefault(key, []).append(row)
         outputs = []
         for key, rows in groups.items():
-            if job.export_split_by == "client_id":
+            if job.export_split_by in {"client_id", "file_client"}:
                 safe_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(key))
                 filename = f"client_{safe_key}_{job.id}.csv"
             else:
@@ -374,7 +393,7 @@ class WorkflowService:
                 content = self._csv_records(self._build_htd_records(mappings, rows), job.delimiter or ",")
             else:
                 headers = [item["display_name"] for item in mappings]
-                detail_rows = [tuple(row.get(f"__{item['database_field']}") for item in mappings) for row in rows]
+                detail_rows = [tuple(self._mapping_value(row, item) for item in mappings) for row in rows]
                 content = self._csv(headers, detail_rows, job.delimiter or ",")
             outputs.append((filename, content, len(rows)))
         return outputs
@@ -382,22 +401,24 @@ class WorkflowService:
     @staticmethod
     def _requires_application_mapping(mappings):
         procedure_fields = {"employee_code", "employee_name", "department", "designation", "payroll_month", "basic_salary", "allowances", "deductions", "net_salary", "payment_status"}
-        return any(item.get("record_type", "D") != "D" or (item.get("database_field") or item.get("db_column_name")) not in procedure_fields for item in mappings)
+        return any(item.get("record_type", "D") != "D" or any(field not in procedure_fields for field in (item.get("database_field") if isinstance(item.get("database_field"), list) else [item.get("database_field") or item.get("db_column_name")])) or len(item.get("database_field") if isinstance(item.get("database_field"), list) else [item.get("database_field") or item.get("db_column_name")]) > 1 for item in mappings)
 
     def _query_application_rows(self, db: Session, job: ReportJob):
         mappings = json.loads(job.column_mappings or "[]")
         normalized = []
         for item in mappings:
-            field = item.get("database_field") or item.get("db_column_name")
-            if field not in MAPPING_FIELDS: raise ValueError("Choose fields from the approved payroll field list.")
-            normalized.append({"display_name": item.get("display_name") or item.get("column_name"), "database_field": field, "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text"})
+            fields = item.get("database_field") or item.get("db_column_name")
+            fields = fields if isinstance(fields, list) else [fields]
+            fields = [field for field in fields if field]
+            if any(field not in MAPPING_FIELDS for field in fields): raise ValueError("Choose fields from the approved payroll field list.")
+            normalized.append({"display_name": item.get("display_name") or item.get("column_name"), "database_field": fields, "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text", "format_pattern": item.get("format_pattern")})
         expressions = {
-            "employee_code": "e.employee_code", "employee_name": "e.employee_name", "department": "e.department", "designation": "e.designation",
+            "employee_id": "e.id", "employee_code": "e.employee_code", "employee_name": "e.employee_name", "department": "e.department", "designation": "e.designation",
             "payroll_month": "p.payroll_month", "paydate": "e.paydate", "basic_salary": "p.basic_salary", "allowances": "p.allowances", "deductions": "p.deductions",
-            "net_salary": "p.net_salary", "payment_status": "p.payment_status", "company_name": "c.company_name",
+            "net_salary": "p.net_salary", "payment_status": "p.payment_status", "company_name": "c.company_name", "company_id": "e.company_id", "is_active": "e.is_active",
         }
-        selected_fields = {item["database_field"] for item in normalized if item["database_field"] in expressions}
-        if "net_salary_total" in {item["database_field"] for item in normalized}:
+        selected_fields = {field for item in normalized for field in item["database_field"] if field in expressions}
+        if "net_salary_total" in {field for item in normalized for field in item["database_field"]}:
             selected_fields.add("net_salary")
         # Pay Date splitting uses the employee-level test field when present.
         # Payroll-period reporting remains available separately through the
@@ -406,7 +427,45 @@ class WorkflowService:
         for field in selected_fields:
             select_parts.append(f'{expressions[field]} AS "__{field}"')
         ids = self._selected_company_ids(job) or [job.company_id]
-        result = db.execute(text(f"SELECT {', '.join(select_parts)} FROM employees e JOIN companies c ON c.id=e.company_id JOIN payroll p ON p.employee_id=e.id WHERE e.company_id IN ({','.join(str(int(value)) for value in ids)}) ORDER BY e.company_id, p.payroll_month, e.employee_code"))
+        try: options = json.loads(job.report_options or "{}")
+        except (TypeError, json.JSONDecodeError): options = {}
+        sortable = {field: expressions[field] for field in expressions}
+        numeric = {field: expressions[field] for field in ("basic_salary", "allowances", "deductions", "net_salary", "employee_id", "company_id", "is_active")}
+        text_fields = {field: expressions[field] for field in ("employee_code", "employee_name", "department", "designation", "payment_status", "company_name")}
+        dates = {field: expressions[field] for field in ("payroll_month", "paydate")}
+        clauses = [f"e.company_id IN ({','.join(str(int(value)) for value in ids)})"]; params = {}
+        operators = {"eq": "=", "neq": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+        filter_rules = options.get("filter_rules") or ([] if not options.get("filter_field") else [{"field": options.get("filter_field"), "operator": options.get("filter_operator"), "value": options.get("filter_value")}])
+        for index, rule in enumerate(filter_rules):
+            field, operator, value = rule.get("field"), rule.get("operator"), rule.get("value")
+            field_map = numeric.get(field) or text_fields.get(field) or dates.get(field)
+            if not field_map:
+                continue
+            if operator in {"is_null", "is_not_null", "is_empty", "is_not_empty"}:
+                null_clause = f"{field_map} IS NULL" if operator in {"is_null", "is_empty"} else f"{field_map} IS NOT NULL"
+                if operator in {"is_empty", "is_not_empty"} and field in text_fields:
+                    null_clause = f"COALESCE({field_map}, '') = ''" if operator == "is_empty" else f"COALESCE({field_map}, '') <> ''"
+                clauses.append(null_clause)
+                continue
+            if field_map and value not in (None, "", []) and operator in (set(operators) | {"contains", "not_contains", "starts_with", "ends_with", "in"}):
+                parameter = f"filter_value_{index}"
+                if field in text_fields and operator in {"contains", "starts_with", "ends_with"}:
+                    pattern = {"contains": f"%{value}%", "starts_with": f"{value}%", "ends_with": f"%{value}"}[operator]
+                    clauses.append(f"{field_map} LIKE :{parameter}"); params[parameter] = pattern
+                elif field in text_fields and operator == "not_contains":
+                    clauses.append(f"{field_map} NOT LIKE :{parameter}"); params[parameter] = f"%{value}%"
+                elif operator == "in":
+                    values = value if isinstance(value, list) else [item.strip() for item in str(value).split(",") if item.strip()]
+                    placeholders = []
+                    for item_index, item in enumerate(values):
+                        item_parameter = f"{parameter}_{item_index}"; placeholders.append(f":{item_parameter}"); params[item_parameter] = item
+                    if placeholders: clauses.append(f"{field_map} IN ({', '.join(placeholders)})")
+                elif operator not in {"contains", "starts_with", "ends_with"}:
+                    clauses.append(f"{field_map} {operators[operator]} :{parameter}"); params[parameter] = value
+        sort_rules = options.get("sort_rules") or ([] if not options.get("sort_field") else [{"field": options.get("sort_field"), "direction": options.get("sort_direction")}])
+        order_parts = [f"{sortable[rule['field']]} {'DESC' if rule.get('direction') == 'desc' else 'ASC'}" for rule in sort_rules if rule.get("field") in sortable]
+        order_parts = order_parts or ["e.company_id ASC", "p.payroll_month ASC", "e.employee_code ASC"]
+        result = db.execute(text(f"SELECT {', '.join(select_parts)} FROM employees e JOIN companies c ON c.id=e.company_id JOIN payroll p ON p.employee_id=e.id WHERE {' AND '.join(clauses)} ORDER BY {', '.join(order_parts)}"), params)
         rows = [dict(row._mapping) for row in result.fetchmany(get_settings().max_report_rows)]
         return rows, normalized
 
@@ -415,7 +474,7 @@ class WorkflowService:
         if self._requires_application_mapping(mappings):
             return self._build_htd_records(normalized, rows), None
         headers = [item["display_name"] for item in normalized]
-        return [tuple(row.get(f"__{item['database_field']}") for item in normalized) for row in rows], headers
+        return [tuple(self._mapping_value(row, item) for item in normalized) for row in rows], headers
 
     def _build_htd_records(self, mappings, rows):
         if not rows: return []
@@ -428,14 +487,22 @@ class WorkflowService:
             for source in source_rows:
                 values = []
                 for item in selected:
-                    field = item["database_field"]
-                    if field == "employee_count": value = len(rows)
-                    elif field == "net_salary_total": value = sum((Decimal(str(r.get("__net_salary") or 0)) for r in rows), Decimal("0"))
-                    elif field == "company_name" and len({r.get("__client_id") for r in rows}) > 1: value = "Multiple Companies"
-                    else: value = source.get(f"__{field}")
-                    values.append(self._format_value(value, item["format"]))
+                    value = self._mapping_value(source, item, rows)
+                    values.append(self._format_value(value, item["format"], item.get("format_pattern")))
                 records.append(values)
         return records
+
+    def _mapping_value(self, row, item, all_rows=None):
+        fields = item.get("database_field") or item.get("db_column_name") or []
+        fields = fields if isinstance(fields, list) else [fields]
+        values = []
+        for field in fields:
+            if field == "employee_count": value = len(all_rows or [])
+            elif field == "net_salary_total": value = sum((Decimal(str(r.get("__net_salary") or 0)) for r in (all_rows or [row])), Decimal("0"))
+            elif field == "company_name" and all_rows is not None and len({r.get("__client_id") for r in all_rows}) > 1: value = "Multiple Companies"
+            else: value = row.get(f"__{field}")
+            if value is not None and str(value) != "": values.append(str(value))
+        return " ".join(values)
 
     def _csv_records(self, records, delimiter):
         delimiter = delimiter if delimiter in {",", "|", ";", "\t"} else ","
@@ -443,14 +510,25 @@ class WorkflowService:
         writer.writerows([[self._safe(value) for value in row] for row in records]); return output.getvalue()
 
     @staticmethod
-    def _format_value(value, format_name):
-        if value is None: return ""
+    def _format_value(value, format_name, format_pattern=None):
+        if value is None:
+            return str(format_pattern) if format_pattern else ""
+        if format_name == "Default":
+            text_value = str(value)
+            if format_pattern:
+                try: return str(format_pattern).replace("{value}", text_value)
+                except Exception: return text_value
+            return text_value
         if format_name in {"Date", "DateDMY", "DateMDY"} and isinstance(value, (datetime, date)):
             return value.strftime({"Date": "%Y-%m-%d", "DateDMY": "%d-%m-%Y", "DateMDY": "%m/%d/%Y"}[format_name])
         if format_name in {"PhoneDash", "PhoneParens"}:
             digits = re.sub(r"\D", "", str(value))
             if len(digits) == 10:
                 return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if format_name == "PhoneDash" else f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+        if format_name in {"CurrencyUSD", "CurrencyINR", "CurrencyEUR"}:
+            symbols = {"CurrencyUSD": "$", "CurrencyINR": "₹", "CurrencyEUR": "€"}
+            try: return f"{symbols[format_name]}{Decimal(str(value)):,.2f}"
+            except Exception: return str(value)
         return str(value)
 
     @staticmethod

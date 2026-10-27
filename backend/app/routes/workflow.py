@@ -4,6 +4,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+import logging
 
 from app.controllers.workflow_controller import WorkflowController
 from app.database.session import get_db
@@ -12,6 +14,17 @@ from app.utils.security import bearer_scheme, get_token_claims
 
 router = APIRouter(tags=["workflow"])
 controller = WorkflowController()
+frontend_logger = logging.getLogger("app.frontend")
+
+
+class ClientErrorPayload(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+    source: str = Field(default="window", max_length=80)
+
+
+@router.post("/client-errors", status_code=204)
+def client_error(payload: ClientErrorPayload):
+    frontend_logger.error("%s: %s", payload.source, payload.message)
 
 
 MENU_ALIASES = {
@@ -51,6 +64,12 @@ def jobs(db=Depends(get_db), _: None = Depends(authorize("jobs"))): return contr
 def create_job(payload: JobCreate, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     try: return controller.create_job(db, payload)
     except ValueError as exc: raise HTTPException(status_code=422, detail=str(exc)) from exc
+@router.put("/jobs/{job_id}", response_model=JobRead)
+def update_job(job_id: int, payload: JobCreate, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
+    try:
+        return controller.update_job(db, job_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "Job not found." else 422, detail=str(exc)) from exc
 @router.post("/jobs/{job_id}/enabled", response_model=JobRead)
 def enabled(job_id: int, enabled: bool, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     try:

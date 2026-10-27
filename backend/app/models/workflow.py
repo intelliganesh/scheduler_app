@@ -88,12 +88,13 @@ class ReportJob(Base):
     delimiter: Mapped[str | None] = mapped_column(String(1), nullable=True)
     schedule_time: Mapped[str] = mapped_column(String(5))  # HH:MM, Asia/Kolkata
     schedule_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    recurrence: Mapped[str] = mapped_column(String(12))
+    recurrence: Mapped[str] = mapped_column(String(20))
     day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
     day_of_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recipients: Mapped[str | None] = mapped_column(Text, nullable=True)
     client_selections: Mapped[str | None] = mapped_column(Text, nullable=True)
     export_split_by: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    report_options: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_run_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
@@ -102,6 +103,7 @@ class ReportJob(Base):
     @property
     def schedule_type(self) -> str:
         if self.recurrence == "once": return "one_time"
+        if self.recurrence == "every_2_minutes": return "every_2_minutes"
         if self.recurrence.startswith("hourly_"): return self.recurrence
         return self.recurrence
 

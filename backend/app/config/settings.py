@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     mock_testexpert_password: str = ""
     generated_reports_dir: str = "../generated_reports"
     uploads_dir: str = "uploads"
+    log_dir: str = "../logs"
     max_report_rows: int = 1000
     max_upload_bytes: int = 16384
     max_email_recipients: int = 10

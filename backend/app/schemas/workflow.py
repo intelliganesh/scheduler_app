@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 import json
 import re
 
@@ -86,22 +87,25 @@ class ColumnMapping(BaseModel):
     # and the SQL Server mapped-report procedure. New clients may use the clearer
     # column_name/db_column_name names instead.
     display_name: str | None = Field(default=None, max_length=160)
-    database_field: str | None = Field(default=None, max_length=80)
+    database_field: str | list[str] | None = Field(default=None)
     column_name: str | None = Field(default=None, max_length=160)
-    db_column_name: str | None = Field(default=None, max_length=80)
+    db_column_name: str | list[str] | None = Field(default=None)
     record_type: Literal["H", "D", "T"] = "D"
-    format: Literal["Text", "TextPhone", "PhoneDash", "PhoneParens", "Date", "DateDMY", "DateMDY"] = "Text"
+    format: Literal["Default", "Text", "TextPhone", "PhoneDash", "PhoneParens", "Date", "DateDMY", "DateMDY", "CurrencyUSD", "CurrencyINR", "CurrencyEUR"] = "Default"
+    format_pattern: str | None = Field(default=None, max_length=120)
 
     @model_validator(mode="after")
     def normalize_mapping(self):
         column_name = (self.column_name or self.display_name or "").strip()
-        db_column_name = (self.db_column_name or self.database_field or "").strip()
-        if not column_name or not db_column_name:
-            raise ValueError("Each mapping needs a column name and database field.")
+        raw_fields = self.db_column_name if self.db_column_name is not None else self.database_field
+        fields = raw_fields if isinstance(raw_fields, list) else [raw_fields or ""]
+        fields = [str(field).strip() for field in fields if str(field).strip()]
+        if not column_name:
+            raise ValueError("Each mapping needs a column name.")
         object.__setattr__(self, "column_name", column_name)
         object.__setattr__(self, "display_name", self.display_name or column_name)
-        object.__setattr__(self, "db_column_name", db_column_name)
-        object.__setattr__(self, "database_field", self.database_field or db_column_name)
+        object.__setattr__(self, "db_column_name", fields)
+        object.__setattr__(self, "database_field", fields)
         return self
 
 
@@ -117,15 +121,22 @@ class JobCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=160)
     company_id: int
     source_type: str
-    source_key: str | None = None
+    source_key: str | None = "company_payroll_report"
     uploaded_query_id: int | None = None
     schedule_at: datetime
     recipients: list[str] = Field(default_factory=list)
     column_mappings: list[ColumnMapping] | None = None
     delimiter: Literal[",", "|", ";", "\t"] = ","
     client_selections: dict[str, list[str]] = Field(default_factory=dict)
-    export_split_by: Literal["file_name", "client_id", "pay_date"] = "file_name"
-    schedule_type: Literal["one_time", "hourly_1", "hourly_2", "hourly_4", "daily", "weekly", "monthly"] = "one_time"
+    export_split_by: Literal["file_name", "client_id", "pay_date", "file_client", "file_pay", "client_pay", "file_client_pay"] = "file_name"
+    sort_field: str | None = Field(default=None, max_length=80)
+    sort_direction: Literal["asc", "desc"] = "asc"
+    filter_field: str | None = Field(default=None, max_length=80)
+    filter_operator: Literal["eq", "gt", "gte", "lt", "lte"] = "gt"
+    filter_value: Decimal | None = None
+    sort_rules: list[dict] = Field(default_factory=list)
+    filter_rules: list[dict] = Field(default_factory=list)
+    schedule_type: Literal["one_time", "every_2_minutes", "hourly_1", "hourly_2", "hourly_4", "daily", "weekly", "monthly"] = "one_time"
     weekly_day: int | None = Field(default=None, ge=0, le=6)
     monthly_day: int | None = Field(default=None, ge=1, le=31)
     enabled: bool = True
@@ -152,8 +163,6 @@ class JobCreate(BaseModel):
         if self.column_mappings:
             if len({item.column_name.casefold() for item in self.column_mappings}) != len(self.column_mappings):
                 raise ValueError("TXT column names must be unique.")
-            if len({item.db_column_name for item in self.column_mappings}) != len(self.column_mappings):
-                raise ValueError("Database fields must be mapped one-to-one.")
         return self
 
 
@@ -171,6 +180,7 @@ class JobRead(BaseModel):
     delimiter: str | None
     client_selections: dict[str, list[str]] = Field(default_factory=dict)
     export_split_by: str | None
+    report_options: dict = Field(default_factory=dict)
     schedule_type: str
     schedule_time: str
     schedule_at: datetime | None
@@ -182,6 +192,14 @@ class JobRead(BaseModel):
     next_run_at: datetime | None
     last_run_status: str | None
     created_at: datetime | None
+
+    @field_validator("report_options", mode="before")
+    @classmethod
+    def validate_report_options(cls, value):
+        if value is None or value == "": return {}
+        if isinstance(value, dict): return value
+        try: return json.loads(value)
+        except (TypeError, json.JSONDecodeError): return {}
 
     @field_validator("recipients", mode="before")
     @classmethod

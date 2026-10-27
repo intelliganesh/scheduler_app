@@ -26,6 +26,7 @@ async function request(path, options = {}) {
 
 export const api = {
   health: () => request("/health"),
+  clientError: (token, payload) => request("/api/client-errors", { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: JSON.stringify(payload) }),
   getReports: () => request("/api/reports"),
   createReport: (report) => request("/api/reports", { method: "POST", body: JSON.stringify(report) }),
   login: (username, password) => request("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
@@ -38,6 +39,7 @@ export const api = {
   approvedProcedures: (token) => request("/api/approved-procedures", { headers: { Authorization: `Bearer ${token}` } }),
   uploadQuery: (token, file) => { const body = new FormData(); body.append("file", file); return request("/api/uploads/query", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body }); },
   createJob: (token, job) => request("/api/jobs", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(job) }),
+  updateJob: (token, id, job) => request(`/api/jobs/${id}`, { method: "PUT", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(job) }),
   jobs: (token) => request("/api/jobs", { headers: { Authorization: `Bearer ${token}` } }),
   dashboard: (token) => request("/api/dashboard", { headers: { Authorization: `Bearer ${token}` } }),
   runs: (token) => request("/api/runs", { headers: { Authorization: `Bearer ${token}` } }),

@@ -20,6 +20,12 @@ class WorkflowController:
         if scheduler.scheduler.running:
             scheduler.sync_job(job)
         return job
+    def update_job(self, db, job_id, payload: JobCreate):
+        job = self.service.update_job(db, job_id, payload)
+        scheduler = get_scheduler()
+        if scheduler.scheduler.running:
+            scheduler.sync_job(job)
+        return job
     def upload(self, db, name, content): return self.service.create_upload(db, name, content)
     def enable(self, db, job_id, enabled): return self.service.set_enabled(db, job_id, enabled)
     def run(self, db, job_id, retry_run_id=None): return self.service.run_job(db, job_id, retry_run_id)
