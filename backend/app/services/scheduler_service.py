@@ -14,6 +14,9 @@ from app.services.workflow_service import WorkflowService
 
 job_logger = logging.getLogger("app.jobs")
 KOLKATA = ZoneInfo("Asia/Kolkata")
+# The UI and stored day_of_week use Sunday=0 … Saturday=6, while APScheduler's
+# numeric day_of_week starts at Monday=0. Day names avoid that ambiguity.
+CRON_WEEKDAYS = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
 
 
 class MonthlyLastDayTrigger(BaseTrigger):
@@ -58,35 +61,36 @@ class SchedulerService:
         db = SessionLocal()
         try:
             for job in db.query(ReportJob).all(): self.sync_job(job)
+            # sync_job updates next_run_at from the live trigger; persist it so
+            # the UI shows the scheduler's real next execution.
+            db.commit()
         finally: db.close()
+    @staticmethod
+    def build_trigger(job):
+        """Return the APScheduler trigger for a job's saved schedule."""
+        if job.recurrence == "once":
+            return DateTrigger(run_date=job.schedule_at, timezone=KOLKATA)
+        if job.recurrence == "every_2_minutes":
+            return IntervalTrigger(minutes=2, start_date=job.schedule_at, timezone=KOLKATA)
+        if job.recurrence.startswith("hourly_"):
+            return IntervalTrigger(hours=int(job.recurrence.split("_", 1)[1]), start_date=job.schedule_at, timezone=KOLKATA)
+        hour, minute = map(int, job.schedule_time.split(":"))
+        if job.recurrence == "monthly":
+            return MonthlyLastDayTrigger(day=job.day_of_month or 1, hour=hour, minute=minute, start_date=job.schedule_at, timezone=KOLKATA)
+        # Execution Date is the first eligible run for every recurring type.
+        args = {"hour": hour, "minute": minute, "timezone": KOLKATA, "start_date": job.schedule_at}
+        if job.recurrence == "weekly":
+            args["day_of_week"] = CRON_WEEKDAYS[job.day_of_week if job.day_of_week is not None else 0]
+        return CronTrigger(**args)
     def sync_job(self, job):
         job_id = f"report-job-{job.id}"
         if not job.enabled:
             self.scheduler.remove_job(job_id) if self.scheduler.get_job(job_id) else None; return
+        trigger = self.build_trigger(job)
         if job.recurrence == "once":
-            self.scheduler.add_job(self._run, DateTrigger(run_date=job.schedule_at, timezone=ZoneInfo("Asia/Kolkata")), args=[job.id], id=job_id, replace_existing=True, max_instances=1, misfire_grace_time=300)
+            self.scheduler.add_job(self._run, trigger, args=[job.id], id=job_id, replace_existing=True, max_instances=1, misfire_grace_time=300)
             job.next_run_at = job.schedule_at
             return
-        if job.recurrence == "every_2_minutes":
-            trigger = IntervalTrigger(minutes=2, start_date=job.schedule_at, timezone=ZoneInfo("Asia/Kolkata"))
-            self.scheduler.add_job(self._run, trigger, args=[job.id], id=job_id, replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=300)
-            job.next_run_at = self.scheduler.get_job(job_id).next_run_time
-            return
-        if job.recurrence.startswith("hourly_"):
-            hours = int(job.recurrence.split("_", 1)[1])
-            trigger = IntervalTrigger(hours=hours, start_date=job.schedule_at, timezone=ZoneInfo("Asia/Kolkata"))
-            self.scheduler.add_job(self._run, trigger, args=[job.id], id=job_id, replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=300)
-            job.next_run_at = self.scheduler.get_job(job_id).next_run_time
-            return
-        hour, minute = map(int, job.schedule_time.split(":"))
-        args = {"hour": hour, "minute": minute, "timezone": ZoneInfo("Asia/Kolkata")}
-        if job.recurrence == "weekly":
-            args["day_of_week"] = job.day_of_week if job.day_of_week is not None else 0
-            trigger = CronTrigger(**args)
-        elif job.recurrence == "monthly":
-            trigger = MonthlyLastDayTrigger(day=job.day_of_month or 1, hour=hour, minute=minute, start_date=job.schedule_at, timezone=KOLKATA)
-        else:
-            trigger = CronTrigger(**args)
         self.scheduler.add_job(self._run, trigger, args=[job.id], id=job_id, replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=300)
         job.next_run_at = self.scheduler.get_job(job_id).next_run_time
     def remove_all_report_jobs(self):

@@ -1,12 +1,15 @@
 import csv
 import io
 import json
+import logging
 import re
+import threading
 import zipfile
 from decimal import Decimal
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 
@@ -33,6 +36,69 @@ MAPPING_FIELDS = (
 )
 MAPPING_PROCEDURE = "mapped_employee_payroll_report"
 LEGACY_PROCEDURES = {"sales_by_company": "dbo.usp_SalesByCompany", "monthly_sales_summary": "dbo.usp_MonthlySalesSummary", "product_sales_report": "dbo.usp_ProductSalesReport"}
+FIELD_EXPRESSIONS = {
+    "employee_id": "e.id", "employee_code": "e.employee_code", "employee_name": "e.employee_name", "department": "e.department", "designation": "e.designation",
+    "payroll_month": "p.payroll_month", "paydate": "e.paydate", "basic_salary": "p.basic_salary", "allowances": "p.allowances", "deductions": "p.deductions",
+    "net_salary": "p.net_salary", "payment_status": "p.payment_status", "company_name": "c.company_name", "company_id": "e.company_id", "is_active": "e.is_active",
+}
+NUMERIC_FILTER_FIELDS = ("basic_salary", "allowances", "deductions", "net_salary", "employee_id", "company_id", "is_active")
+TEXT_FILTER_FIELDS = ("employee_code", "employee_name", "department", "designation", "payment_status", "company_name")
+DATE_FILTER_FIELDS = ("payroll_month", "paydate")
+COMPARISON_OPERATORS = {"eq": "=", "neq": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+TEXT_PATTERN_OPERATORS = {"contains", "not_contains", "starts_with", "ends_with"}
+VALUELESS_OPERATORS = {"is_null", "is_not_null", "is_empty", "is_not_empty"}
+# Text columns support equality, text matching, lists, and blank/null checks.
+# Numeric and date columns additionally support ordered comparisons.
+TEXT_OPERATORS = {"eq", "neq"} | TEXT_PATTERN_OPERATORS | VALUELESS_OPERATORS | {"in"}
+NON_TEXT_OPERATORS = set(COMPARISON_OPERATORS) | VALUELESS_OPERATORS | {"in"}
+
+
+def _filter_value_problem(field: str, value) -> str | None:
+    values = value if isinstance(value, list) else [value]
+    for item in values:
+        text_value = str(item).strip()
+        if field in NUMERIC_FILTER_FIELDS:
+            try: Decimal(text_value)
+            except Exception: return f"Filter value for {field} must be a number."
+        elif field in DATE_FILTER_FIELDS:
+            try: date.fromisoformat(text_value[:10])
+            except ValueError: return f"Filter value for {field} must be a date (YYYY-MM-DD)."
+    return None
+
+
+def validate_report_rules(filter_rules: list, sort_rules: list) -> None:
+    """Reject filter/sort rules the report query cannot apply instead of ignoring them."""
+    for rule in filter_rules:
+        if not isinstance(rule, dict): raise ValueError("Each filter must be an object.")
+        field, operator, value = rule.get("field"), rule.get("operator"), rule.get("value")
+        if field not in FIELD_EXPRESSIONS: raise ValueError(f"Unsupported filter field: {field}.")
+        allowed = TEXT_OPERATORS if field in TEXT_FILTER_FIELDS else NON_TEXT_OPERATORS
+        if operator not in allowed: raise ValueError(f"Filter condition '{operator}' is not supported for {field}.")
+        if operator in VALUELESS_OPERATORS or value in (None, "", []): continue
+        problem = _filter_value_problem(field, value)
+        if problem: raise ValueError(problem)
+    for rule in sort_rules:
+        if not isinstance(rule, dict) or rule.get("field") not in FIELD_EXPRESSIONS: raise ValueError(f"Unsupported sort field: {rule.get('field') if isinstance(rule, dict) else rule}.")
+        if rule.get("direction", "asc") not in {"asc", "desc"}: raise ValueError("Sort direction must be asc or desc.")
+
+
+def _like_escape(value) -> str:
+    return re.sub(r"([\\%_\[])", r"\\\1", str(value))
+
+
+KOLKATA = ZoneInfo("Asia/Kolkata")
+job_logger = logging.getLogger("app.jobs")
+# One execution per job at a time within this process (manual, retry, and
+# scheduled runs all go through run_job).
+_RUN_LOCKS: dict[int, threading.Lock] = {}
+_RUN_LOCKS_GUARD = threading.Lock()
+
+
+def _run_lock(job_id: int) -> threading.Lock:
+    with _RUN_LOCKS_GUARD:
+        return _RUN_LOCKS.setdefault(job_id, threading.Lock())
+
+
 APPROVED_TXT_QUERY = "SELECT e.employee_code AS employee_id, e.employee_name, e.department, e.designation, p.payroll_month, p.basic_salary, p.allowances, p.deductions, p.net_salary, p.payment_status FROM employees e JOIN payroll p ON p.employee_id = e.id WHERE e.company_id = :company_id AND p.payroll_month = (SELECT MAX(p2.payroll_month) FROM payroll p2 JOIN employees e2 ON e2.id = p2.employee_id WHERE e2.company_id = :company_id) ORDER BY e.employee_code"
 
 
@@ -152,7 +218,13 @@ class WorkflowService:
         keys = [(item.get("record_type", "D").upper(), item["column_name"].casefold()) for item in columns]
         if len(set(keys)) != len(keys): raise ValueError(f"{source_label} column names must be unique within each record type.")
 
-    def _job_values(self, db: Session, payload: JobCreate) -> dict:
+    def _job_values(self, db: Session, payload: JobCreate, existing: ReportJob | None = None) -> dict:
+        schedule_at = self._kolkata_wall_clock(payload.schedule_at)
+        # New schedules must start in the future (one minute of grace for slow
+        # form submission). An edit may keep the job's original start unchanged.
+        unchanged_start = existing is not None and existing.schedule_at is not None and existing.schedule_at.replace(tzinfo=None, second=0, microsecond=0) == schedule_at.replace(second=0, microsecond=0)
+        if not unchanged_start and schedule_at < datetime.now(KOLKATA).replace(tzinfo=None) - timedelta(minutes=1):
+            raise ValueError("Execution date and time must be in the future (Asia/Kolkata).")
         if db.get(Company, payload.company_id) is None: raise ValueError("Company not found.")
         client_selections = {}
         for raw_client_id, email_ids in payload.client_selections.items():
@@ -185,6 +257,12 @@ class WorkflowService:
                 raise ValueError("Every upload column must be mapped in its original order.")
             if any(field and field not in MAPPING_FIELDS for item in mappings for field in (item.db_column_name if isinstance(item.db_column_name, list) else [item.db_column_name])):
                 raise ValueError("Choose fields from the approved payroll field list.")
+            unmapped = [item.column_name for item in mappings if not item.db_column_name and item.default_value is None]
+            if unmapped:
+                raise ValueError(f"Map every uploaded column to at least one approved field: {', '.join(unmapped)}.")
+            empty_defaults = [item.column_name for item in mappings if item.default_value is not None and not item.default_value.strip()]
+            if empty_defaults:
+                raise ValueError(f"Enter a default value for: {', '.join(empty_defaults)}.")
         elif mappings or payload.uploaded_query_id:
             raise ValueError("TXT mappings are supported only by the mapped payroll procedure.")
         values = payload.model_dump(exclude={"column_mappings", "schedule_type", "weekly_day", "monthly_day", "sort_field", "sort_direction", "filter_field", "filter_operator", "filter_value", "sort_rules", "filter_rules"})
@@ -193,11 +271,20 @@ class WorkflowService:
         values["column_mappings"] = json.dumps([item.model_dump(exclude_none=True) for item in mappings], ensure_ascii=False) if mappings else None
         sort_rules = payload.sort_rules or ([{"field": payload.sort_field, "direction": payload.sort_direction}] if payload.sort_field else [])
         filter_rules = payload.filter_rules or ([{"field": payload.filter_field, "operator": payload.filter_operator, "value": str(payload.filter_value)}] if payload.filter_field and payload.filter_value is not None else [])
+        validate_report_rules(filter_rules, sort_rules)
+        if payload.source_key != MAPPING_PROCEDURE:
+            # Splitting and filtering run in the application-side mapped query;
+            # other approved procedures return their fixed result set.
+            if payload.export_split_by != "file_name":
+                raise ValueError("Export Split By options other than File Name require an uploaded column list (Mapped Employee Payroll Report).")
+            if filter_rules:
+                raise ValueError("Filters require an uploaded column list (Mapped Employee Payroll Report).")
         values["report_options"] = json.dumps({"sort_rules": sort_rules, "filter_rules": filter_rules, "sort_field": payload.sort_field, "sort_direction": payload.sort_direction, "filter_field": payload.filter_field, "filter_operator": payload.filter_operator, "filter_value": str(payload.filter_value) if payload.filter_value is not None else None}, ensure_ascii=False)
         recurrence = {"one_time": "once", "every_2_minutes": "every_2_minutes", "hourly_1": "hourly_1", "hourly_2": "hourly_2", "hourly_4": "hourly_4", "daily": "daily", "weekly": "weekly", "monthly": "monthly"}[payload.schedule_type]
         if payload.schedule_type == "weekly" and payload.weekly_day is None: raise ValueError("Choose a day of the week for weekly schedules.")
         if payload.schedule_type == "monthly" and payload.monthly_day is None: raise ValueError("Choose a day of the month for monthly schedules.")
-        values["schedule_time"] = payload.schedule_at.strftime("%H:%M"); values["recurrence"] = recurrence; values["day_of_week"] = payload.weekly_day; values["day_of_month"] = payload.monthly_day; values["next_run_at"] = payload.schedule_at
+        values["schedule_at"] = schedule_at
+        values["schedule_time"] = schedule_at.strftime("%H:%M"); values["recurrence"] = recurrence; values["day_of_week"] = payload.weekly_day; values["day_of_month"] = payload.monthly_day; values["next_run_at"] = schedule_at
         return values
 
     def create_job(self, db: Session, payload: JobCreate) -> ReportJob:
@@ -207,7 +294,7 @@ class WorkflowService:
     def update_job(self, db: Session, job_id: int, payload: JobCreate) -> ReportJob:
         job = self.repository.job(db, job_id)
         if not job: raise ValueError("Job not found.")
-        values = self._job_values(db, payload)
+        values = self._job_values(db, payload, existing=job)
         for key, value in values.items():
             if key not in {"id", "created_at"}:
                 setattr(job, key, value)
@@ -251,6 +338,15 @@ class WorkflowService:
         job.enabled = enabled; db.commit(); db.refresh(job); return job
 
     def run_job(self, db: Session, job_id: int, retry_run_id: int | None = None) -> JobRun:
+        lock = _run_lock(job_id)
+        if not lock.acquire(blocking=False):
+            raise ValueError("This job is already running. Wait for the current execution to finish.")
+        try:
+            return self._run_job(db, job_id, retry_run_id)
+        finally:
+            lock.release()
+
+    def _run_job(self, db: Session, job_id: int, retry_run_id: int | None = None) -> JobRun:
         job = self.repository.job(db, job_id)
         if not job: raise ValueError("Job not found.")
         if not job.enabled and retry_run_id is None:
@@ -281,8 +377,13 @@ class WorkflowService:
             run.status = "Completed"; run.current_step = "Completed"; run.completed_at = datetime.now(); job.last_run_status = run.status
             db.commit(); db.refresh(run); return run
         except Exception as exc:
-            run.status = "Failed" if not run.csv_content else "Partially Completed"; run.error_message = "Report execution failed. Review the run details."
-            run.current_step = run.current_step or "Unknown"; self._log(run, run.current_step, "Failed")
+            step = run.current_step or "Unknown"
+            # Business-rule errors raised by this service are safe to show; other
+            # errors (database/driver details) stay in the job log only.
+            reason = str(exc) if isinstance(exc, ValueError) and str(exc) else "An unexpected error occurred. See the backend job log for details."
+            job_logger.exception("Job %s run %s failed during %s", job.id, run.id, step)
+            run.status = "Failed" if not run.csv_content else "Partially Completed"; run.error_message = f"Report execution failed during {step}: {reason}"
+            run.current_step = step; self._log(run, run.current_step, "Failed")
             job.last_run_status = run.status; db.commit(); raise ValueError(run.error_message) from exc
 
     def _execute_source(self, db: Session, job: ReportJob):
@@ -295,7 +396,7 @@ class WorkflowService:
                 column_name = item.get("column_name") or item.get("display_name")
                 database_field = item.get("db_column_name") or item.get("database_field")
                 database_fields = database_field if isinstance(database_field, list) else [database_field]
-                normalized.append({**item, "column_name": column_name, "display_name": item.get("display_name") or column_name, "db_column_name": database_field, "database_field": database_field, "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text"})
+                normalized.append({**item, "column_name": column_name, "display_name": item.get("display_name") or column_name, "db_column_name": database_field, "database_field": database_field, "default_value": item.get("default_value"), "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text"})
             mappings = normalized
             selected_company_ids = self._selected_company_ids(job)
             if dialect == "mssql" and not selected_company_ids and not self._requires_application_mapping(mappings):
@@ -343,7 +444,7 @@ class WorkflowService:
             stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
             # Split archives may contain several companies; avoid naming the
             # archive after only the primary company shown on the job record.
-            job_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", (job.title or "payroll_export").strip()).strip("_").lower() or "payroll_export"
+            job_slug = self._job_slug(job)
             archive_name = f"{job_slug}_{job.id}_run_{run.id}_{stamp}.zip"
             archive_path = folder / archive_name
             total_rows = 0
@@ -353,20 +454,23 @@ class WorkflowService:
                     total_rows += item.get("rows", 0)
             generated = GeneratedFile(run_id=run.id, job_id=job.id, company_id=job.company_id, file_name=archive_name, storage_path=str(archive_path.resolve()), row_count=total_rows, file_size=archive_path.stat().st_size)
             db.add(generated); return generated
-        filename = f"{company.company_name.lower().replace(' ', '_')}_{job.id}_run_{run.id}_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        # A single CSV covering several selected companies is named after the
+        # job, like split archives, rather than after the primary company only.
+        prefix = self._job_slug(job) if len(self._selected_company_ids(job)) > 1 else company.company_name.lower().replace(' ', '_')
+        filename = f"{prefix}_{job.id}_run_{run.id}_{datetime.now():%Y%m%d_%H%M%S}.csv"
         path = folder / filename; path.write_text(run.csv_content or "", encoding="utf-8", newline="")
         row_count = self._generated_detail_row_count(job, run.csv_content or "")
         generated = GeneratedFile(run_id=run.id, job_id=job.id, company_id=job.company_id, file_name=filename, storage_path=str(path.resolve()), row_count=row_count, file_size=path.stat().st_size)
         db.add(generated); return generated
 
     def _generated_detail_row_count(self, job: ReportJob, content: str) -> int:
-        """Return D-record count for H/D/T output, legacy header-row count otherwise."""
+        """Return D-record count for H/D/T output, header-row CSV data rows otherwise."""
         mappings = json.loads(job.column_mappings or "[]") if job.column_mappings else []
         record_types = [str(item.get("record_type") or "D").upper() for item in mappings if isinstance(item, dict)]
-        if "H" not in record_types and "T" not in record_types:
-            return max(0, len(content.splitlines()) - 1)
         delimiter = job.delimiter if job.delimiter in {",", "|", ";", "\t"} else ","
         physical_rows = list(csv.reader(io.StringIO(content), delimiter=delimiter))
+        if "H" not in record_types and "T" not in record_types:
+            return max(0, len(physical_rows) - 1)
         return max(0, len(physical_rows) - (1 if "H" in record_types else 0) - (1 if "T" in record_types else 0))
 
     def _execute_split_source(self, db: Session, job: ReportJob):
@@ -381,19 +485,21 @@ class WorkflowService:
             key = row["__client_id"] if job.export_split_by in {"client_id", "file_client"} else (row["__client_id"], row["__pay_date"])
             groups.setdefault(key, []).append(row)
         outputs = []
+        # "File Name + …" modes keep the same grouping as their counterparts and
+        # prefix every member with the job's file name.
+        prefix = f"{self._job_slug(job)}_" if job.export_split_by.startswith("file_") else ""
         for key, rows in groups.items():
             if job.export_split_by in {"client_id", "file_client"}:
                 safe_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(key))
-                filename = f"client_{safe_key}_{job.id}.csv"
+                filename = f"{prefix}client_{safe_key}_{job.id}.csv"
             else:
                 client_id, pay_date = key
                 safe_date = re.sub(r"[^A-Za-z0-9_-]+", "_", str(pay_date))
-                filename = f"client_{client_id}_paydate_{safe_date}_{job.id}.csv"
+                filename = f"{prefix}client_{client_id}_paydate_{safe_date}_{job.id}.csv"
             if any(item["record_type"] in {"H", "T"} for item in mappings):
                 content = self._csv_records(self._build_htd_records(mappings, rows), job.delimiter or ",")
             else:
-                headers = [item["display_name"] for item in mappings]
-                detail_rows = [tuple(self._mapping_value(row, item) for item in mappings) for row in rows]
+                headers, detail_rows = self._detail_table(mappings, rows)
                 content = self._csv(headers, detail_rows, job.delimiter or ",")
             outputs.append((filename, content, len(rows)))
         return outputs
@@ -401,7 +507,7 @@ class WorkflowService:
     @staticmethod
     def _requires_application_mapping(mappings):
         procedure_fields = {"employee_code", "employee_name", "department", "designation", "payroll_month", "basic_salary", "allowances", "deductions", "net_salary", "payment_status"}
-        return any(item.get("record_type", "D") != "D" or any(field not in procedure_fields for field in (item.get("database_field") if isinstance(item.get("database_field"), list) else [item.get("database_field") or item.get("db_column_name")])) or len(item.get("database_field") if isinstance(item.get("database_field"), list) else [item.get("database_field") or item.get("db_column_name")]) > 1 for item in mappings)
+        return any(item.get("record_type", "D") != "D" or item.get("default_value") is not None or any(field not in procedure_fields for field in (item.get("database_field") if isinstance(item.get("database_field"), list) else [item.get("database_field") or item.get("db_column_name")])) or len(item.get("database_field") if isinstance(item.get("database_field"), list) else [item.get("database_field") or item.get("db_column_name")]) > 1 for item in mappings)
 
     def _query_application_rows(self, db: Session, job: ReportJob):
         mappings = json.loads(job.column_mappings or "[]")
@@ -411,12 +517,8 @@ class WorkflowService:
             fields = fields if isinstance(fields, list) else [fields]
             fields = [field for field in fields if field]
             if any(field not in MAPPING_FIELDS for field in fields): raise ValueError("Choose fields from the approved payroll field list.")
-            normalized.append({"display_name": item.get("display_name") or item.get("column_name"), "database_field": fields, "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text", "format_pattern": item.get("format_pattern")})
-        expressions = {
-            "employee_id": "e.id", "employee_code": "e.employee_code", "employee_name": "e.employee_name", "department": "e.department", "designation": "e.designation",
-            "payroll_month": "p.payroll_month", "paydate": "e.paydate", "basic_salary": "p.basic_salary", "allowances": "p.allowances", "deductions": "p.deductions",
-            "net_salary": "p.net_salary", "payment_status": "p.payment_status", "company_name": "c.company_name", "company_id": "e.company_id", "is_active": "e.is_active",
-        }
+            normalized.append({"display_name": item.get("display_name") or item.get("column_name"), "database_field": fields, "default_value": item.get("default_value"), "record_type": item.get("record_type") or "D", "format": item.get("format") or "Text", "format_pattern": item.get("format_pattern")})
+        expressions = FIELD_EXPRESSIONS
         selected_fields = {field for item in normalized for field in item["database_field"] if field in expressions}
         if "net_salary_total" in {field for item in normalized for field in item["database_field"]}:
             selected_fields.add("net_salary")
@@ -429,41 +531,38 @@ class WorkflowService:
         ids = self._selected_company_ids(job) or [job.company_id]
         try: options = json.loads(job.report_options or "{}")
         except (TypeError, json.JSONDecodeError): options = {}
-        sortable = {field: expressions[field] for field in expressions}
-        numeric = {field: expressions[field] for field in ("basic_salary", "allowances", "deductions", "net_salary", "employee_id", "company_id", "is_active")}
-        text_fields = {field: expressions[field] for field in ("employee_code", "employee_name", "department", "designation", "payment_status", "company_name")}
-        dates = {field: expressions[field] for field in ("payroll_month", "paydate")}
         clauses = [f"e.company_id IN ({','.join(str(int(value)) for value in ids)})"]; params = {}
-        operators = {"eq": "=", "neq": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
         filter_rules = options.get("filter_rules") or ([] if not options.get("filter_field") else [{"field": options.get("filter_field"), "operator": options.get("filter_operator"), "value": options.get("filter_value")}])
+        sort_rules = options.get("sort_rules") or ([] if not options.get("sort_field") else [{"field": options.get("sort_field"), "direction": options.get("sort_direction")}])
+        # Jobs saved before rule validation existed may hold rules the query
+        # cannot apply; fail with a clear reason instead of ignoring them.
+        validate_report_rules(filter_rules, sort_rules)
         for index, rule in enumerate(filter_rules):
             field, operator, value = rule.get("field"), rule.get("operator"), rule.get("value")
-            field_map = numeric.get(field) or text_fields.get(field) or dates.get(field)
-            if not field_map:
-                continue
-            if operator in {"is_null", "is_not_null", "is_empty", "is_not_empty"}:
+            field_map = expressions[field]
+            if operator in VALUELESS_OPERATORS:
                 null_clause = f"{field_map} IS NULL" if operator in {"is_null", "is_empty"} else f"{field_map} IS NOT NULL"
-                if operator in {"is_empty", "is_not_empty"} and field in text_fields:
+                if operator in {"is_empty", "is_not_empty"} and field in TEXT_FILTER_FIELDS:
                     null_clause = f"COALESCE({field_map}, '') = ''" if operator == "is_empty" else f"COALESCE({field_map}, '') <> ''"
                 clauses.append(null_clause)
                 continue
-            if field_map and value not in (None, "", []) and operator in (set(operators) | {"contains", "not_contains", "starts_with", "ends_with", "in"}):
-                parameter = f"filter_value_{index}"
-                if field in text_fields and operator in {"contains", "starts_with", "ends_with"}:
-                    pattern = {"contains": f"%{value}%", "starts_with": f"{value}%", "ends_with": f"%{value}"}[operator]
-                    clauses.append(f"{field_map} LIKE :{parameter}"); params[parameter] = pattern
-                elif field in text_fields and operator == "not_contains":
-                    clauses.append(f"{field_map} NOT LIKE :{parameter}"); params[parameter] = f"%{value}%"
-                elif operator == "in":
-                    values = value if isinstance(value, list) else [item.strip() for item in str(value).split(",") if item.strip()]
-                    placeholders = []
-                    for item_index, item in enumerate(values):
-                        item_parameter = f"{parameter}_{item_index}"; placeholders.append(f":{item_parameter}"); params[item_parameter] = item
-                    if placeholders: clauses.append(f"{field_map} IN ({', '.join(placeholders)})")
-                elif operator not in {"contains", "starts_with", "ends_with"}:
-                    clauses.append(f"{field_map} {operators[operator]} :{parameter}"); params[parameter] = value
-        sort_rules = options.get("sort_rules") or ([] if not options.get("sort_field") else [{"field": options.get("sort_field"), "direction": options.get("sort_direction")}])
-        order_parts = [f"{sortable[rule['field']]} {'DESC' if rule.get('direction') == 'desc' else 'ASC'}" for rule in sort_rules if rule.get("field") in sortable]
+            if value in (None, "", []):
+                continue
+            parameter = f"filter_value_{index}"
+            if operator in TEXT_PATTERN_OPERATORS:
+                escaped = _like_escape(value)
+                pattern = {"contains": f"%{escaped}%", "not_contains": f"%{escaped}%", "starts_with": f"{escaped}%", "ends_with": f"%{escaped}"}[operator]
+                keyword = "NOT LIKE" if operator == "not_contains" else "LIKE"
+                clauses.append(f"{field_map} {keyword} :{parameter} ESCAPE '\\'"); params[parameter] = pattern
+            elif operator == "in":
+                values = value if isinstance(value, list) else [item.strip() for item in str(value).split(",") if item.strip()]
+                placeholders = []
+                for item_index, item in enumerate(values):
+                    item_parameter = f"{parameter}_{item_index}"; placeholders.append(f":{item_parameter}"); params[item_parameter] = item
+                if placeholders: clauses.append(f"{field_map} IN ({', '.join(placeholders)})")
+            else:
+                clauses.append(f"{field_map} {COMPARISON_OPERATORS[operator]} :{parameter}"); params[parameter] = value
+        order_parts = [f"{expressions[rule['field']]} {'DESC' if rule.get('direction') == 'desc' else 'ASC'}" for rule in sort_rules]
         order_parts = order_parts or ["e.company_id ASC", "p.payroll_month ASC", "e.employee_code ASC"]
         result = db.execute(text(f"SELECT {', '.join(select_parts)} FROM employees e JOIN companies c ON c.id=e.company_id JOIN payroll p ON p.employee_id=e.id WHERE {' AND '.join(clauses)} ORDER BY {', '.join(order_parts)}"), params)
         rows = [dict(row._mapping) for row in result.fetchmany(get_settings().max_report_rows)]
@@ -471,10 +570,16 @@ class WorkflowService:
 
     def _execute_application_mapping(self, db: Session, job: ReportJob, mappings):
         rows, normalized = self._query_application_rows(db, job)
-        if self._requires_application_mapping(mappings):
+        # Only H/T layouts are written as raw records; all-detail layouts keep
+        # the CSV header row even when they use application-only fields.
+        if any(item["record_type"] in {"H", "T"} for item in normalized):
             return self._build_htd_records(normalized, rows), None
-        headers = [item["display_name"] for item in normalized]
-        return [tuple(self._mapping_value(row, item) for item in normalized) for row in rows], headers
+        headers, detail_rows = self._detail_table(normalized, rows)
+        return detail_rows, headers
+
+    def _detail_table(self, mappings, rows):
+        headers = [item["display_name"] for item in mappings]
+        return headers, [tuple(self._format_value(self._mapping_value(row, item, rows), item["format"], item.get("format_pattern")) for item in mappings) for row in rows]
 
     def _build_htd_records(self, mappings, rows):
         if not rows: return []
@@ -487,22 +592,28 @@ class WorkflowService:
             for source in source_rows:
                 values = []
                 for item in selected:
-                    value = self._mapping_value(source, item, rows)
+                    value = self._mapping_value(source, item, rows, aggregate=record_type != "D")
                     values.append(self._format_value(value, item["format"], item.get("format_pattern")))
                 records.append(values)
         return records
 
-    def _mapping_value(self, row, item, all_rows=None):
+    def _mapping_value(self, row, item, all_rows=None, aggregate=False):
+        """Return a single field's raw value (so formats can apply) or joined text for multi-field columns."""
+        if item.get("default_value") is not None:
+            return item["default_value"]
         fields = item.get("database_field") or item.get("db_column_name") or []
         fields = fields if isinstance(fields, list) else [fields]
         values = []
         for field in fields:
             if field == "employee_count": value = len(all_rows or [])
             elif field == "net_salary_total": value = sum((Decimal(str(r.get("__net_salary") or 0)) for r in (all_rows or [row])), Decimal("0"))
-            elif field == "company_name" and all_rows is not None and len({r.get("__client_id") for r in all_rows}) > 1: value = "Multiple Companies"
+            # Only header/trailer records summarize several rows; a detail row
+            # always reports its own company.
+            elif field == "company_name" and aggregate and all_rows is not None and len({r.get("__client_id") for r in all_rows}) > 1: value = "Multiple Companies"
             else: value = row.get(f"__{field}")
-            if value is not None and str(value) != "": values.append(str(value))
-        return " ".join(values)
+            if value is not None and str(value) != "": values.append(value)
+        if len(values) == 1: return values[0]
+        return " ".join(str(value) for value in values)
 
     def _csv_records(self, records, delimiter):
         delimiter = delimiter if delimiter in {",", "|", ";", "\t"} else ","
@@ -519,6 +630,9 @@ class WorkflowService:
                 try: return str(format_pattern).replace("{value}", text_value)
                 except Exception: return text_value
             return text_value
+        if format_name in {"Date", "DateDMY", "DateMDY"} and isinstance(value, str):
+            try: value = datetime.fromisoformat(value.strip())
+            except ValueError: pass
         if format_name in {"Date", "DateDMY", "DateMDY"} and isinstance(value, (datetime, date)):
             return value.strftime({"Date": "%Y-%m-%d", "DateDMY": "%d-%m-%Y", "DateMDY": "%m/%d/%Y"}[format_name])
         if format_name in {"PhoneDash", "PhoneParens"}:
@@ -538,6 +652,15 @@ class WorkflowService:
             return sorted({int(value) for value in selections})
         except (TypeError, ValueError, json.JSONDecodeError):
             return []
+
+    @staticmethod
+    def _kolkata_wall_clock(value: datetime) -> datetime:
+        """Store schedules as naive Asia/Kolkata wall-clock times; naive input is already IST."""
+        return value.astimezone(KOLKATA).replace(tzinfo=None) if value.tzinfo else value
+
+    @staticmethod
+    def _job_slug(job: ReportJob) -> str:
+        return re.sub(r"[^A-Za-z0-9_-]+", "_", (job.title or "payroll_export").strip()).strip("_").lower() or "payroll_export"
 
     @staticmethod
     def _normalize(query: str) -> str: return re.sub(r"\s+", " ", query.strip()).lower()

@@ -26,7 +26,7 @@ export default function JobDetailsPage({ token, job, onBack }) {
   const companyName = (id) => companies.find((company) => String(company.id) === String(id))?.company_name || `Company ${id}`;
   const clients = Object.keys(job?.client_selections || {}).map(Number).filter(Number.isFinite);
   const clientNames = (clients.length ? clients : [job?.company_id]).filter(Boolean).map(companyName).join(", ");
-  const latestStatus = job?.last_run_status || (job?.enabled ? "Scheduled" : "Disabled");
+  const latestStatus = job?.enabled === false ? "Disabled" : job?.last_run_status || "Scheduled";
   const fileRows = useMemo(() => files.slice((filesPage - 1) * PAGE_SIZE, filesPage * PAGE_SIZE), [files, filesPage]);
   const runRows = useMemo(() => runs.slice((runsPage - 1) * PAGE_SIZE, runsPage * PAGE_SIZE), [runs, runsPage]);
   async function download(file) { try { await api.downloadFile(token, file.id, file.file_name); } catch (err) { setError(err.message); } }

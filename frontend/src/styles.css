@@ -1025,6 +1025,25 @@ body {
 .db-field-multi-select {
   width: 100%;
 }
+.db-field-select {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+.default-value-input {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid #d4deeb;
+  border-radius: 7px;
+  font: inherit;
+  color: #344258;
+}
+.default-value-input:focus {
+  border-color: #2563eb;
+  outline: 0;
+  box-shadow: 0 0 0 3px #2563eb1c;
+}
 .field-chip-list {
   display: grid;
   gap: 8px;
@@ -1191,8 +1210,54 @@ body {
 .jobs-card .table-wrap {
   padding: 0 10px 8px;
 }
+.jobs-card .table-wrap table {
+  min-width: 1190px;
+  table-layout: fixed;
+}
+.jobs-card .table-wrap th:nth-child(1),
+.jobs-card .table-wrap td:nth-child(1) {
+  width: 46px;
+}
+.jobs-card .table-wrap th:nth-child(2),
+.jobs-card .table-wrap td:nth-child(2) {
+  width: 180px;
+}
+.jobs-card .table-wrap th:nth-child(3),
+.jobs-card .table-wrap td:nth-child(3) {
+  width: 260px;
+}
+.jobs-card .table-wrap th:nth-child(4),
+.jobs-card .table-wrap td:nth-child(4) {
+  width: 120px;
+}
+.jobs-card .table-wrap th:nth-child(5),
+.jobs-card .table-wrap td:nth-child(5) {
+  width: 96px;
+}
+.jobs-card .table-wrap th:nth-child(6),
+.jobs-card .table-wrap td:nth-child(6) {
+  width: 108px;
+}
+.jobs-card .table-wrap th:nth-child(7),
+.jobs-card .table-wrap td:nth-child(7) {
+  width: 98px;
+}
+.jobs-card .table-wrap th:nth-child(8),
+.jobs-card .table-wrap td:nth-child(8) {
+  width: 160px;
+}
+.jobs-card .table-wrap th:nth-child(9),
+.jobs-card .table-wrap td:nth-child(9) {
+  width: 220px;
+}
+.jobs-card .table-wrap td:nth-child(2),
+.jobs-card .table-wrap td:nth-child(3) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .jobs-card .table-wrap td:last-child {
-  min-width: 250px;
+  min-width: 220px;
 }
 .jobs-card .row-actions {
   flex-wrap: wrap;
@@ -1592,6 +1657,10 @@ body {
 }
 .wizard-header h2 {
   margin: 2px 0 5px;
+}
+.wizard-header-actions {
+  display: flex;
+  gap: 10px;
 }
 .wizard-steps {
   display: flex;
@@ -2288,6 +2357,18 @@ table input[type="checkbox"]:disabled {
 .small-button.secondary:hover {
   border-color: #b8c9df;
 }
+.template-download-button {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 38px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.template-download-button:hover {
+  background: #e2e8f0;
+  color: #334155;
+}
 .custom-format-input {
   width: 100%;
   min-height: 38px;
@@ -2475,7 +2556,8 @@ table input[type="checkbox"]:disabled {
   width: auto;
 }
 .wizard-page .wizard-actions button,
-.wizard-page .wizard-header > .small-button {
+.wizard-page .wizard-header > .small-button,
+.wizard-page .wizard-header-actions > .small-button {
   min-height: var(--wizard-control-height);
   padding: 11px 18px;
   border-radius: var(--wizard-control-radius);
@@ -2483,15 +2565,37 @@ table input[type="checkbox"]:disabled {
   line-height: 1.2;
 }
 .wizard-page .wizard-actions button.secondary,
-.wizard-page .wizard-header > .small-button.secondary {
+.wizard-page .wizard-header > .small-button.secondary,
+.wizard-page .wizard-header-actions > .small-button.secondary {
   border: 1px solid #d7e1ef;
   color: #526176;
   background: #eef2f7;
 }
 .wizard-page .wizard-actions button.secondary:hover,
-.wizard-page .wizard-header > .small-button.secondary:hover {
+.wizard-page .wizard-header > .small-button.secondary:hover,
+.wizard-page .wizard-header-actions > .small-button.secondary:hover {
   color: #29456f;
   background: #e5edf8;
+}
+.wizard-page .wizard-header-actions > .disable-job-button {
+  border: 1px solid #fecaca;
+  color: #b42318;
+  background: #fff1f2;
+}
+.wizard-page .wizard-header-actions > .disable-job-button:hover:not(:disabled) {
+  border-color: #fca5a5;
+  color: #991b1b;
+  background: #ffe4e6;
+}
+.wizard-page .wizard-header-actions > .enable-job-button {
+  border: 1px solid #86efac;
+  color: #166534;
+  background: #f0fdf4;
+}
+.wizard-page .wizard-header-actions > .enable-job-button:hover:not(:disabled) {
+  border-color: #4ade80;
+  color: #14532d;
+  background: #dcfce7;
 }
 .wizard-section .step-helper {
   max-width: 760px;

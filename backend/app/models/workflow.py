@@ -99,6 +99,9 @@ class ReportJob(Base):
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_run_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=func.now(), onupdate=func.now(), nullable=True
+    )
 
     @property
     def schedule_type(self) -> str:

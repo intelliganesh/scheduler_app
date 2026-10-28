@@ -15,7 +15,10 @@ import { api } from "./services/api";
 export default function App() {
     const [user, setUser] = useState(null); const [menus, setMenus] = useState([]); const [menuItems, setMenuItems] = useState([]); const [page, setPage] = useState("dashboard"); const [editingJob, setEditingJob] = useState(null); const [authError, setAuthError] = useState(""); const [token, setToken] = useState(() => sessionStorage.getItem("access_token"));
   function applyPermissions(permissions) {
-    const hiddenMenus = new Set(["dashboard", "generated_files"]);
+    // Dashboard and Generated Files are not in the main navigation; users with
+    // Jobs access reach files through Job Details. Users without Jobs access
+    // (for example viewers) keep Generated Files so they can still download reports.
+    const hiddenMenus = new Set((permissions.menus || []).includes("jobs") ? ["dashboard", "generated_files"] : ["dashboard"]);
     const allowedMenus = (permissions.menus || []).filter((menu) => !hiddenMenus.has(menu)); const items = (permissions.menu_items || []).filter((item) => !hiddenMenus.has(item.id));
     setMenus(allowedMenus); setMenuItems(items);
     const fromUrl = items.find((item) => item.path === window.location.pathname)?.id;

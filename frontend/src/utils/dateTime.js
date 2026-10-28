@@ -10,7 +10,15 @@ function parseTimestamp(value, assumedOffset) {
 
 function format(value, assumedOffset) {
   const date = parseTimestamp(value, assumedOffset);
-  return date ? new Intl.DateTimeFormat(undefined, { timeZone: KOLKATA_TIME_ZONE, dateStyle: "short", timeStyle: "medium" }).format(date) : "—";
+  return date ? new Intl.DateTimeFormat("en-US", {
+    timeZone: KOLKATA_TIME_ZONE,
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date) : "—";
 }
 
 // SQL Server returns created/execution timestamps as UTC-naive values in this project.

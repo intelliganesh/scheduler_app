@@ -4,7 +4,6 @@ import SearchableSelect from "./SearchableSelect";
 import ConfirmDialog from "./ConfirmDialog";
 
 const FORMAT_OPTIONS = [
-  { value: "Default", label: "Default (custom formatting)" },
   { value: "Text", label: "Text" },
   { value: "TextPhone", label: "TextPhone" },
   { value: "PhoneDash", label: "Phone (###-###-####)" },
@@ -93,20 +92,85 @@ const FILTER_OPERATORS = [
   { value: "in", label: "In list (comma separated)" },
 ];
 
+// Text-matching conditions apply only to text fields; the report query
+// rejects them for numeric and date fields.
+const TEXT_ONLY_OPERATORS = new Set([
+  "contains",
+  "not_contains",
+  "starts_with",
+  "ends_with",
+]);
+const COMPARISON_OPERATORS = new Set(["eq", "neq", "gt", "gte", "lt", "lte"]);
+const VALUELESS_OPERATORS = new Set(["is_empty", "is_not_empty", "is_null", "is_not_null"]);
+
 function filterOperatorsForField(field) {
-  return FILTER_OPERATORS;
+  if (NUMERIC_FILTER_FIELDS.has(field) || DATE_FILTER_FIELDS.has(field)) {
+    return FILTER_OPERATORS.filter(
+      (operator) => !TEXT_ONLY_OPERATORS.has(operator.value) && !["is_empty", "is_not_empty"].includes(operator.value),
+    );
+  }
+  return FILTER_OPERATORS.filter(
+    (operator) => !COMPARISON_OPERATORS.has(operator.value) || ["eq", "neq"].includes(operator.value),
+  );
+}
+
+function isPastSchedule(date, time) {
+  const value = Date.parse(`${date}T${time}:00+05:30`);
+  return !Number.isNaN(value) && value < Date.now() - 60000;
 }
 
 function filterRequiresValue(operator) {
-  return !["is_empty", "is_not_empty", "is_null", "is_not_null"].includes(
-    operator,
-  );
+  return !VALUELESS_OPERATORS.has(operator);
 }
 
 function filterInputType(field) {
   if (NUMERIC_FILTER_FIELDS.has(field)) return "number";
-  if (DATE_FILTER_FIELDS.has(field)) return "date";
   return "text";
+}
+
+function formatMdyDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+  return match ? `${match[2]}/${match[3]}/${match[1]}` : "";
+}
+
+function parseMdyDate(value) {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(value).trim());
+  if (!match) return "";
+  const [, month, day, year] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (
+    date.getUTCFullYear() !== Number(year) ||
+    date.getUTCMonth() + 1 !== Number(month) ||
+    date.getUTCDate() !== Number(day)
+  ) return "";
+  return `${year}-${month}-${day}`;
+}
+
+function MdyDateInput({ value, onChange, ariaLabel, required = false }) {
+  const [draft, setDraft] = useState(() => formatMdyDate(value));
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(formatMdyDate(value));
+  }, [value, editing]);
+
+  function change(nextValue) {
+    setDraft(nextValue);
+    onChange(parseMdyDate(nextValue));
+  }
+
+  return <input
+    required={required}
+    type="text"
+    inputMode="numeric"
+    autoComplete="off"
+    aria-label={ariaLabel}
+    value={draft}
+    onFocus={() => setEditing(true)}
+    onBlur={() => setEditing(false)}
+    onChange={(event) => change(event.target.value)}
+    placeholder="MM/DD/YYYY"
+  />;
 }
 
 function normalizeFilterRule(rule) {
@@ -139,11 +203,11 @@ function formatOptionsForField(field) {
   const name = String(field || "").toLowerCase();
   if (name.includes("phone") || name.includes("mobile"))
     return FORMAT_OPTIONS.filter((item) =>
-      ["Default", "Text", "PhoneDash", "PhoneParens"].includes(item.value),
+      ["Text", "PhoneDash", "PhoneParens"].includes(item.value),
     );
   if (name.includes("date") || name.includes("month"))
     return FORMAT_OPTIONS.filter((item) =>
-      ["Default", "Text", "Date", "DateDMY", "DateMDY"].includes(item.value),
+      ["Text", "Date", "DateDMY", "DateMDY"].includes(item.value),
     );
   if (
     name.includes("salary") ||
@@ -152,12 +216,12 @@ function formatOptionsForField(field) {
     name.includes("deduction")
   )
     return FORMAT_OPTIONS.filter((item) =>
-      ["Default", "Text", "CurrencyUSD", "CurrencyINR", "CurrencyEUR"].includes(
+      ["Text", "CurrencyUSD", "CurrencyINR", "CurrencyEUR"].includes(
         item.value,
       ),
     );
   return FORMAT_OPTIONS.filter((item) =>
-    ["Default", "Text"].includes(item.value),
+    ["Text"].includes(item.value),
   );
 }
 
@@ -204,41 +268,30 @@ function MultiSelect({
   );
 }
 
-function DatabaseFieldMultiSelect({ values, onChange, options, ariaLabel }) {
-  const selected = Array.isArray(values) ? values : values ? [values] : [];
-  const available = options.filter(
-    (option) => !selected.includes(String(option.value)),
-  );
-  return (
-    <div className="db-field-multi-select">
-      <div className="field-chip-list">
-        <div className="field-chip-items">
-          {selected.map((value) => (
-            <span className="field-chip" key={value}>
-              {options.find((option) => String(option.value) === String(value))
-                ?.label || value}
-              <button
-                type="button"
-                aria-label={`Remove ${value}`}
-                onClick={() =>
-                  onChange(selected.filter((item) => item !== value))
-                }
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-        <SearchableSelect
-          value=""
-          onChange={(value) => value && onChange([...selected, String(value)])}
-          options={available}
-          placeholder={selected.length ? "Add field" : "Select field"}
-          ariaLabel={ariaLabel}
-        />
-      </div>
-    </div>
-  );
+const DEFAULT_VALUE_FIELD = "__default_value__";
+
+function DatabaseFieldSelect({ value, defaultValue, onChange, onDefaultValueChange, options, ariaLabel }) {
+  const selectedValue = defaultValue !== null && defaultValue !== undefined
+    ? DEFAULT_VALUE_FIELD
+    : value || "";
+  return <div className="db-field-select">
+    <SearchableSelect
+      value={selectedValue}
+      onChange={onChange}
+      options={[...options, { value: DEFAULT_VALUE_FIELD, label: "Default" }]}
+      placeholder="Select field"
+      ariaLabel={ariaLabel}
+    />
+    {selectedValue === DEFAULT_VALUE_FIELD && (
+      <input
+        className="default-value-input"
+        value={defaultValue || ""}
+        onChange={(event) => onDefaultValueChange(event.target.value)}
+        placeholder="Enter default value"
+        aria-label={`Default value for ${ariaLabel}`}
+      />
+    )}
+  </div>;
 }
 
 function UploadColumnList({ upload, mappedCount, totalCount, onChange }) {
@@ -387,12 +440,12 @@ export default function CreateJobForm({
     schedule_type: "daily",
     weekly_day: "",
     monthly_day: "",
-    sort_field: "company_name",
+    sort_field: "",
     sort_direction: "asc",
     filter_field: "net_salary",
     filter_operator: "gt",
     filter_value: "",
-    sort_rules: [{ field: "company_name", direction: "asc" }],
+    sort_rules: [],
     filter_rules: [],
   });
   const [upload, setUpload] = useState(null);
@@ -400,6 +453,8 @@ export default function CreateJobForm({
   const [draggedField, setDraggedField] = useState("");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [togglingEnabled, setTogglingEnabled] = useState(false);
+  const [jobEnabled, setJobEnabled] = useState(editJob?.enabled ?? true);
   const [error, setError] = useState("");
   const selectedProcedure = procedures.find(
     (procedure) => procedure.key === form.source_key,
@@ -407,7 +462,7 @@ export default function CreateJobForm({
   const availableFields = selectedProcedure?.allowed_fields || [];
   const isMappingJob = form.source_key === MAPPED_PROCEDURE;
   const mappedCount = mappingRows.filter(
-    (row) => (row.db_column_names || []).length,
+    (row) => (row.db_column_names || []).length || row.default_value !== null && row.default_value !== undefined,
   ).length;
   const [step, setStep] = useState(1);
   const [discardOpen, setDiscardOpen] = useState(false);
@@ -424,6 +479,7 @@ export default function CreateJobForm({
   }, [token]);
   useEffect(() => {
     if (!editJob || !companies.length) return;
+    setJobEnabled(editJob.enabled);
     const schedule = splitScheduleValue(
       editJob.schedule_at || editJob.next_run_at,
     );
@@ -459,8 +515,8 @@ export default function CreateJobForm({
             : [item.db_column_name || item.database_field || ""].filter(
                 Boolean,
               ),
-        format: item.format || "Default",
-        format_pattern: item.format_pattern || "",
+        default_value: item.default_value ?? null,
+        format: item.format === "Default" ? "Text" : item.format || "Text",
       })),
     );
     let reportOptions = {};
@@ -486,12 +542,9 @@ export default function CreateJobForm({
     const sortRules =
       Array.isArray(reportOptions.sort_rules) && reportOptions.sort_rules.length
         ? reportOptions.sort_rules
-        : [
-            {
-              field: reportOptions.sort_field || "company_name",
-              direction: reportOptions.sort_direction || "asc",
-            },
-          ];
+        : reportOptions.sort_field
+          ? [{ field: reportOptions.sort_field, direction: reportOptions.sort_direction || "asc" }]
+          : [];
     const filterRules = Array.isArray(reportOptions.filter_rules)
       ? reportOptions.filter_rules
       : reportOptions.filter_value !== null &&
@@ -524,7 +577,7 @@ export default function CreateJobForm({
       schedule_type: scheduleType,
       weekly_day: editJob.day_of_week ?? "",
       monthly_day: editJob.day_of_month ?? "",
-      sort_field: reportOptions.sort_field || "company_name",
+      sort_field: reportOptions.sort_field || "",
       sort_direction: reportOptions.sort_direction || "asc",
       filter_field: reportOptions.filter_field || "net_salary",
       filter_operator: reportOptions.filter_operator || "gt",
@@ -607,14 +660,19 @@ export default function CreateJobForm({
     }));
   }
   function removeRule(type, index) {
-    setForm((current) => ({
-      ...current,
-      [type]: (current[type] || []).filter(
+    setForm((current) => {
+      const remaining = (current[type] || []).filter(
         (_, ruleIndex) => ruleIndex !== index,
-      ),
-    }));
+      );
+      return {
+        ...current,
+        [type]: remaining,
+        ...(type === "sort_rules" && !remaining.length ? { sort_field: "" } : {}),
+      };
+    });
   }
   function addClient(id) {
+    setError("");
     setSelectedClientIds((current) => {
       const next = current.includes(id) ? current : [...current, id];
       update("company_id", next[0] || "");
@@ -660,21 +718,25 @@ export default function CreateJobForm({
     }));
     setEmailErrors((current) => ({ ...current, [clientId]: "" }));
   }
-  function setMapping(name, recordType, fields) {
+  function setMapping(name, recordType, field) {
     setMappingRows((current) =>
       current.map((row) =>
         row.column_name === name && row.record_type === recordType
           ? {
               ...row,
-              db_column_names: Array.isArray(fields)
-                ? fields
-                : fields
-                  ? [fields]
-                  : [],
+              db_column_names: field && field !== DEFAULT_VALUE_FIELD ? [field] : [],
+              default_value: field === DEFAULT_VALUE_FIELD ? (row.default_value ?? "") : null,
             }
           : row,
       ),
     );
+  }
+  function setDefaultValue(name, recordType, default_value) {
+    setMappingRows((current) => current.map((row) =>
+      row.column_name === name && row.record_type === recordType
+        ? { ...row, default_value }
+        : row,
+    ));
   }
   function setRecordType(name, oldRecordType, record_type) {
     setMappingRows((current) =>
@@ -690,15 +752,6 @@ export default function CreateJobForm({
       current.map((row) =>
         row.column_name === name && row.record_type === recordType
           ? { ...row, format }
-          : row,
-      ),
-    );
-  }
-  function setFormatPattern(name, recordType, format_pattern) {
-    setMappingRows((current) =>
-      current.map((row) =>
-        row.column_name === name && row.record_type === recordType
-          ? { ...row, format_pattern }
           : row,
       ),
     );
@@ -720,8 +773,8 @@ export default function CreateJobForm({
               column_name: item,
               record_type: "D",
               db_column_names: [],
-              format: "Default",
-              format_pattern: "",
+              default_value: null,
+              format: "Text",
             }
           : {
               column_name: item.column_name || item.display_name,
@@ -733,8 +786,8 @@ export default function CreateJobForm({
                   : [item.db_column_name || item.database_field || ""].filter(
                       Boolean,
                     ),
-              format: item.format || "Default",
-              format_pattern: item.format_pattern || "",
+              default_value: item.default_value ?? null,
+              format: item.format === "Default" ? "Text" : item.format || "Text",
             },
       );
       setUpload({
@@ -805,8 +858,9 @@ export default function CreateJobForm({
               record_type: row.record_type,
               db_column_name: row.db_column_names || [],
               database_field: row.db_column_names || [],
-              format: row.format || "Default",
-              format_pattern: row.format_pattern || null,
+              default_value: row.default_value,
+              format: row.format || "Text",
+              format_pattern: null,
             }))
           : null,
         delimiter: form.delimiter,
@@ -832,7 +886,7 @@ export default function CreateJobForm({
           .map(normalizeFilterRule),
         client_selections: clientSelections,
         recipients: [],
-        enabled: editJob?.enabled ?? true,
+        enabled: jobEnabled,
       };
       if (isEditing) await api.updateJob(token, editJob.id, payload);
       else await api.createJob(token, payload);
@@ -853,12 +907,12 @@ export default function CreateJobForm({
           schedule_type: "daily",
           weekly_day: "",
           monthly_day: "",
-          sort_field: "company_name",
+          sort_field: "",
           sort_direction: "asc",
           filter_field: "net_salary",
           filter_operator: "gt",
           filter_value: "",
-          sort_rules: [{ field: "company_name", direction: "asc" }],
+          sort_rules: [],
           filter_rules: [],
         }));
         setSelectedClientIds([]);
@@ -893,8 +947,30 @@ export default function CreateJobForm({
       form.monthly_day === ""
     )
       return "Choose a day of the month.";
-    if (target > 1 && isMappingJob && !upload)
+    if (target > 1 && (isMappingJob || !isEditing) && !upload)
       return "Upload a column list before continuing.";
+    const originalSchedule = isEditing
+      ? splitScheduleValue(editJob.schedule_at || editJob.next_run_at)
+      : null;
+    const scheduleChanged =
+      !originalSchedule ||
+      originalSchedule.date !== form.schedule_date ||
+      originalSchedule.time !== form.schedule_time;
+    if (
+      target > 1 &&
+      scheduleChanged &&
+      isPastSchedule(form.schedule_date, form.schedule_time)
+    )
+      return "Execution date and time must be in the future (Asia/Kolkata).";
+    if (target > 2 && isMappingJob && mappedCount < mappingRows.length)
+      return "Map every uploaded column to at least one database field.";
+    if (
+      target > 2 &&
+      isMappingJob &&
+      mappingRows.some(
+        (row) => row.default_value !== null && row.default_value !== undefined && !String(row.default_value).trim(),
+      )
+    ) return "Enter a default value for every column mapped as Default.";
     return "";
   };
   function nextStep() {
@@ -912,6 +988,20 @@ export default function CreateJobForm({
   }
   function cancelWizard() {
     setDiscardOpen(true);
+  }
+  async function toggleJobEnabled() {
+    if (!editJob) return;
+    try {
+      setTogglingEnabled(true);
+      setError("");
+      const updated = await api.toggleJob(token, editJob.id, !jobEnabled);
+      setJobEnabled(updated.enabled);
+      setMessage(updated.enabled ? "Job enabled." : "Job disabled.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setTogglingEnabled(false);
+    }
   }
   const companyLabel = (id) =>
     companies.find((company) => String(company.id) === String(id))
@@ -941,13 +1031,25 @@ export default function CreateJobForm({
               : "Create, configure, and schedule a report job."}
           </p>
         </div>
-        <button
-          type="button"
-          className="small-button secondary"
-          onClick={cancelWizard}
-        >
-          Cancel
-        </button>
+        <div className="wizard-header-actions">
+          {isEditing && (
+            <button
+              type="button"
+              className={`small-button ${jobEnabled ? "disable-job-button" : "enable-job-button"}`}
+              disabled={togglingEnabled}
+              onClick={toggleJobEnabled}
+            >
+              {togglingEnabled ? "Updating…" : jobEnabled ? "Disable" : "Enable"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="small-button secondary"
+            onClick={cancelWizard}
+          >
+            Cancel
+          </button>
+        </div>
       </div>
       <div className="wizard-steps">
         {[
@@ -1011,13 +1113,11 @@ export default function CreateJobForm({
               <div className="schedule-date-time-grid">
                 <label>
                   Execution Date <span className="required">*</span>
-                  <input
+                  <MdyDateInput
                     required
-                    type="date"
+                    ariaLabel="Execution Date"
                     value={form.schedule_date}
-                    onChange={(event) =>
-                      update("schedule_date", event.target.value)
-                    }
+                    onChange={(value) => update("schedule_date", value)}
                   />
                 </label>
                 <label>
@@ -1230,25 +1330,29 @@ export default function CreateJobForm({
                                 </select>
                               </td>
                               <td className="mapping-cell">
-                                <DatabaseFieldMultiSelect
-                                  values={row.db_column_names}
-                                  onChange={(values) =>
-                                    setMapping(
-                                      row.column_name,
-                                      row.record_type,
-                                      values,
-                                    )
-                                  }
+                                <DatabaseFieldSelect
+                                  value={row.db_column_names?.[0] || ""}
+                                  defaultValue={row.default_value}
+                                  onChange={(value) => setMapping(
+                                    row.column_name,
+                                    row.record_type,
+                                    value,
+                                  )}
+                                  onDefaultValueChange={(value) => setDefaultValue(
+                                    row.column_name,
+                                    row.record_type,
+                                    value,
+                                  )}
                                   options={availableFields.map((field) => ({
                                     value: field,
                                     label: databaseFieldLabel(field),
                                   }))}
-                                  ariaLabel={`Database fields for ${row.column_name}`}
+                                  ariaLabel={`Database field for ${row.column_name}`}
                                 />
                               </td>
                               <td className="mapping-cell">
                                 <SearchableSelect
-                                  value={row.format || "Default"}
+                                  value={row.format || "Text"}
                                   onChange={(value) =>
                                     setFormat(
                                       row.column_name,
@@ -1257,26 +1361,12 @@ export default function CreateJobForm({
                                     )
                                   }
                                   options={formatOptionsForField(
-                                    (row.db_column_names || []).join(" "),
+                                    (row.db_column_names || []).join(" ") ||
+                                      row.column_name,
                                   )}
                                   placeholder="Select format"
                                   ariaLabel={`Format for ${row.column_name}`}
                                 />
-                                {row.format === "Default" && (
-                                  <input
-                                    className="custom-format-input"
-                                    value={row.format_pattern || ""}
-                                    onChange={(event) =>
-                                      setFormatPattern(
-                                        row.column_name,
-                                        row.record_type,
-                                        event.target.value,
-                                      )
-                                    }
-                                    placeholder="Custom pattern, e.g. {value}"
-                                    aria-label={`Custom format pattern for ${row.column_name}`}
-                                  />
-                                )}
                               </td>
                             </tr>
                           ))}
@@ -1315,28 +1405,36 @@ export default function CreateJobForm({
                       )}
                       ariaLabel={`Filter condition ${index + 1}`}
                     />
-                    <input
-                      type={filterInputType(rule.field || "net_salary")}
-                      step={
-                        NUMERIC_FILTER_FIELDS.has(rule.field || "net_salary")
-                          ? "0.01"
-                          : undefined
-                      }
-                      value={rule.value ?? ""}
-                      onChange={(event) =>
-                        updateRule(
-                          "filter_rules",
-                          index,
-                          "value",
-                          event.target.value,
-                        )
-                      }
-                      placeholder={
-                        NUMERIC_FILTER_FIELDS.has(rule.field || "net_salary")
-                          ? "Value, e.g. 0"
-                          : "Enter a value"
-                      }
-                    />
+                    {DATE_FILTER_FIELDS.has(rule.field || "net_salary") ? (
+                      <MdyDateInput
+                        ariaLabel={`Filter date value ${index + 1}`}
+                        value={rule.value ?? ""}
+                        onChange={(value) => updateRule("filter_rules", index, "value", value)}
+                      />
+                    ) : (
+                      <input
+                        type={filterInputType(rule.field || "net_salary")}
+                        step={
+                          NUMERIC_FILTER_FIELDS.has(rule.field || "net_salary")
+                            ? "0.01"
+                            : undefined
+                        }
+                        value={rule.value ?? ""}
+                        onChange={(event) =>
+                          updateRule(
+                            "filter_rules",
+                            index,
+                            "value",
+                            event.target.value,
+                          )
+                        }
+                        placeholder={
+                          NUMERIC_FILTER_FIELDS.has(rule.field || "net_salary")
+                            ? "Value, e.g. 0"
+                            : "Enter a value"
+                        }
+                      />
+                    )}
                     <button
                       type="button"
                       className="small-button secondary"
@@ -1392,7 +1490,6 @@ export default function CreateJobForm({
                     <button
                       type="button"
                       className="small-button secondary"
-                      disabled={(form.sort_rules || []).length === 1}
                       onClick={() => removeRule("sort_rules", index)}
                     >
                       Remove

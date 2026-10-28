@@ -9,7 +9,7 @@ import logging
 
 from app.controllers.workflow_controller import WorkflowController
 from app.database.session import get_db
-from app.schemas.workflow import JobCreate, JobRead
+from app.schemas.workflow import JobCreate, JobRead, RunRead
 from app.utils.security import bearer_scheme, get_token_claims
 
 router = APIRouter(tags=["workflow"])
@@ -23,7 +23,9 @@ class ClientErrorPayload(BaseModel):
 
 
 @router.post("/client-errors", status_code=204)
-def client_error(payload: ClientErrorPayload):
+def client_error(payload: ClientErrorPayload, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
+    # Only signed-in browsers report errors; anonymous callers cannot write to the log.
+    get_token_claims(credentials)
     frontend_logger.error("%s: %s", payload.source, payload.message)
 
 
@@ -79,17 +81,17 @@ def enabled(job_id: int, enabled: bool, db=Depends(get_db), _: None = Depends(au
 @router.post("/jobs/{job_id}/run")
 def run(job_id: int, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     try:
-        return controller.run(db, job_id)
+        return RunRead.model_validate(controller.run(db, job_id))
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-@router.get("/runs")
+        raise HTTPException(status_code=404 if str(exc) == "Job not found." else 422, detail=str(exc)) from exc
+@router.get("/runs", response_model=list[RunRead])
 def runs(failed_before: datetime | None = None, db=Depends(get_db), _: None = Depends(authorize("jobs"))): return controller.runs(db, failed_before)
 @router.post("/runs/{run_id}/retry")
 def retry(run_id: int, db=Depends(get_db), _: None = Depends(authorize("jobs"))):
     record = controller.service.repository.run(db, run_id)
     if not record: raise HTTPException(status_code=404, detail="Run not found.")
     try:
-        return controller.run(db, record.job_id, run_id)
+        return RunRead.model_validate(controller.run(db, record.job_id, run_id))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 @router.get("/files")

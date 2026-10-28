@@ -90,6 +90,7 @@ class ColumnMapping(BaseModel):
     database_field: str | list[str] | None = Field(default=None)
     column_name: str | None = Field(default=None, max_length=160)
     db_column_name: str | list[str] | None = Field(default=None)
+    default_value: str | None = Field(default=None, max_length=500)
     record_type: Literal["H", "D", "T"] = "D"
     format: Literal["Default", "Text", "TextPhone", "PhoneDash", "PhoneParens", "Date", "DateDMY", "DateMDY", "CurrencyUSD", "CurrencyINR", "CurrencyEUR"] = "Default"
     format_pattern: str | None = Field(default=None, max_length=120)
@@ -102,6 +103,8 @@ class ColumnMapping(BaseModel):
         fields = [str(field).strip() for field in fields if str(field).strip()]
         if not column_name:
             raise ValueError("Each mapping needs a column name.")
+        if self.default_value is not None and fields:
+            raise ValueError("A mapping can use either a database field or a default value, not both.")
         object.__setattr__(self, "column_name", column_name)
         object.__setattr__(self, "display_name", self.display_name or column_name)
         object.__setattr__(self, "db_column_name", fields)
@@ -192,6 +195,7 @@ class JobRead(BaseModel):
     next_run_at: datetime | None
     last_run_status: str | None
     created_at: datetime | None
+    updated_at: datetime | None
 
     @field_validator("report_options", mode="before")
     @classmethod
