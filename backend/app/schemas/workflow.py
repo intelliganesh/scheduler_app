@@ -139,7 +139,7 @@ class JobCreate(BaseModel):
     filter_value: Decimal | None = None
     sort_rules: list[dict] = Field(default_factory=list)
     filter_rules: list[dict] = Field(default_factory=list)
-    schedule_type: Literal["one_time", "every_2_minutes", "hourly_1", "hourly_2", "hourly_4", "daily", "weekly", "monthly"] = "one_time"
+    schedule_type: Literal["one_time", "every_1_minute", "every_2_minutes", "hourly_1", "hourly_2", "hourly_4", "daily", "weekly", "monthly"] = "one_time"
     weekly_day: int | None = Field(default=None, ge=0, le=6)
     monthly_day: int | None = Field(default=None, ge=1, le=31)
     enabled: bool = True

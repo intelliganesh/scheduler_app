@@ -280,7 +280,7 @@ class WorkflowService:
             if filter_rules:
                 raise ValueError("Filters require an uploaded column list (Mapped Employee Payroll Report).")
         values["report_options"] = json.dumps({"sort_rules": sort_rules, "filter_rules": filter_rules, "sort_field": payload.sort_field, "sort_direction": payload.sort_direction, "filter_field": payload.filter_field, "filter_operator": payload.filter_operator, "filter_value": str(payload.filter_value) if payload.filter_value is not None else None}, ensure_ascii=False)
-        recurrence = {"one_time": "once", "every_2_minutes": "every_2_minutes", "hourly_1": "hourly_1", "hourly_2": "hourly_2", "hourly_4": "hourly_4", "daily": "daily", "weekly": "weekly", "monthly": "monthly"}[payload.schedule_type]
+        recurrence = {"one_time": "once", "every_1_minute": "every_1_minute", "every_2_minutes": "every_2_minutes", "hourly_1": "hourly_1", "hourly_2": "hourly_2", "hourly_4": "hourly_4", "daily": "daily", "weekly": "weekly", "monthly": "monthly"}[payload.schedule_type]
         if payload.schedule_type == "weekly" and payload.weekly_day is None: raise ValueError("Choose a day of the week for weekly schedules.")
         if payload.schedule_type == "monthly" and payload.monthly_day is None: raise ValueError("Choose a day of the month for monthly schedules.")
         values["schedule_at"] = schedule_at

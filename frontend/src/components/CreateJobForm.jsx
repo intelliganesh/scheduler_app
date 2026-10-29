@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../services/api";
 import SearchableSelect from "./SearchableSelect";
 import ConfirmDialog from "./ConfirmDialog";
@@ -147,30 +147,50 @@ function parseMdyDate(value) {
 }
 
 function MdyDateInput({ value, onChange, ariaLabel, required = false }) {
+  const pickerRef = useRef(null);
   const [draft, setDraft] = useState(() => formatMdyDate(value));
-  const [editing, setEditing] = useState(false);
-
   useEffect(() => {
-    if (!editing) setDraft(formatMdyDate(value));
-  }, [value, editing]);
-
-  function change(nextValue) {
-    setDraft(nextValue);
-    onChange(parseMdyDate(nextValue));
-  }
-
-  return <input
-    required={required}
-    type="text"
-    inputMode="numeric"
-    autoComplete="off"
-    aria-label={ariaLabel}
-    value={draft}
-    onFocus={() => setEditing(true)}
-    onBlur={() => setEditing(false)}
-    onChange={(event) => change(event.target.value)}
-    placeholder="MM/DD/YYYY"
-  />;
+    setDraft(formatMdyDate(value));
+  }, [value]);
+  return (
+    <div className="date-input-control">
+      <input
+        required={required}
+        type="text"
+        inputMode="numeric"
+        autoComplete="off"
+        aria-label={ariaLabel}
+        value={draft}
+        placeholder="MM/DD/YYYY"
+        onChange={(event) => {
+          const next = event.target.value;
+          setDraft(next);
+          const parsed = parseMdyDate(next);
+          if (parsed || !next.trim()) onChange(parsed);
+        }}
+      />
+      <button
+        type="button"
+        className="date-picker-button"
+        aria-label={`Open ${ariaLabel} picker`}
+        onClick={() => pickerRef.current?.showPicker?.()}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="4.5" width="18" height="16" rx="2" />
+          <path d="M7 2.75v4M17 2.75v4M3 9h18M7 13h3M7 16.5h3M14 13h3M14 16.5h3" />
+        </svg>
+      </button>
+      <input
+        ref={pickerRef}
+        className="native-date-picker"
+        type="date"
+        tabIndex={-1}
+        aria-hidden="true"
+        value={value || ""}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </div>
+  );
 }
 
 function normalizeFilterRule(rule) {
@@ -560,7 +580,7 @@ export default function CreateJobForm({
         : [];
     const savedScheduleType =
       editJob.schedule_type === "once" ? "one_time" : editJob.schedule_type;
-    const scheduleType = ["daily", "weekly", "monthly"].includes(
+    const scheduleType = ["every_1_minute", "daily", "weekly", "monthly"].includes(
       savedScheduleType,
     )
       ? savedScheduleType
@@ -1008,6 +1028,7 @@ export default function CreateJobForm({
       ?.company_name || id;
   const scheduleLabel = {
     one_time: "One Time",
+    every_1_minute: "Every 1 Minute",
     every_2_minutes: "Every 2 Minutes",
     hourly_1: "Every 1 Hour",
     hourly_2: "Every 2 Hours",
@@ -1042,13 +1063,6 @@ export default function CreateJobForm({
               {togglingEnabled ? "Updating…" : jobEnabled ? "Disable" : "Enable"}
             </button>
           )}
-          <button
-            type="button"
-            className="small-button secondary"
-            onClick={cancelWizard}
-          >
-            Cancel
-          </button>
         </div>
       </div>
       <div className="wizard-steps">
@@ -1102,6 +1116,7 @@ export default function CreateJobForm({
                   value={form.schedule_type}
                   onChange={(value) => update("schedule_type", value)}
                   options={[
+                    { value: "every_1_minute", label: "Every 1 Minute" },
                     { value: "daily", label: "Daily" },
                     { value: "weekly", label: "Weekly" },
                     { value: "monthly", label: "Monthly" },

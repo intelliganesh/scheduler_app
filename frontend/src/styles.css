@@ -1954,7 +1954,8 @@ table input[type="checkbox"]:disabled {
 .wizard-section label > input,
 .wizard-section label > select,
 .wizard-section label > .searchable-select,
-.wizard-section label > .email-recipient-control {
+.wizard-section label > .email-recipient-control,
+.wizard-section label > .date-input-control {
   width: 100%;
   margin-top: 7px;
 }
@@ -2042,9 +2043,13 @@ table input[type="checkbox"]:disabled {
 }
 .wizard-actions {
   align-items: center;
+  justify-content: flex-end;
   min-height: 66px;
   margin-top: 25px;
   padding-top: 18px;
+}
+.wizard-actions button:last-child {
+  margin-left: 0;
 }
 .wizard-actions button {
   min-width: 112px;
@@ -2194,6 +2199,57 @@ table input[type="checkbox"]:disabled {
 .wizard-page input[type="datetime-local"]::-webkit-calendar-picker-indicator {
   opacity: 0.7;
   cursor: pointer;
+}
+.wizard-page input[type="date"] {
+  color-scheme: light;
+  appearance: auto;
+  padding-right: 12px;
+}
+.wizard-page input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.7;
+  cursor: pointer;
+}
+.date-input-control {
+  position: relative;
+  width: 100%;
+}
+.date-input-control > input[type="text"] {
+  padding-right: 48px;
+}
+.date-picker-button {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #64748b;
+  transform: translateY(-50%);
+}
+.date-picker-button:hover {
+  background: #eff6ff;
+  color: #2563eb;
+}
+.date-picker-button svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+.native-date-picker {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 .wizard-page .email-chips,
 .wizard-page .multi-select-chips {

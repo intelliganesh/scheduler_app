@@ -70,6 +70,8 @@ class SchedulerService:
         """Return the APScheduler trigger for a job's saved schedule."""
         if job.recurrence == "once":
             return DateTrigger(run_date=job.schedule_at, timezone=KOLKATA)
+        if job.recurrence == "every_1_minute":
+            return IntervalTrigger(minutes=1, start_date=job.schedule_at, timezone=KOLKATA)
         if job.recurrence == "every_2_minutes":
             return IntervalTrigger(minutes=2, start_date=job.schedule_at, timezone=KOLKATA)
         if job.recurrence.startswith("hourly_"):

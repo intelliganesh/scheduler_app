@@ -6,7 +6,7 @@ import { api } from "../services/api";
 import { formatKolkata, formatUtcInKolkata } from "../utils/dateTime";
 
 const PAGE_SIZE = 10;
-const scheduleLabels = { one_time: "One Time", every_2_minutes: "Every 2 Minutes", hourly_1: "Every 1 Hour", hourly_2: "Every 2 Hours", hourly_4: "Every 4 Hours", daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
+const scheduleLabels = { one_time: "One Time", every_1_minute: "Every 1 Minute", every_2_minutes: "Every 2 Minutes", hourly_1: "Every 1 Hour", hourly_2: "Every 2 Hours", hourly_4: "Every 4 Hours", daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
 const splitLabels = { file_name: "File Name", client_id: "Client ID", pay_date: "Pay Date", file_client: "File Name + Client ID", file_pay: "File Name + Pay Date", client_pay: "Client ID + Pay Date", file_client_pay: "File Name + Client ID + Pay Date" };
 
 function Pager({ page, total, onChange }) {
