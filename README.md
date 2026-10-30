@@ -88,6 +88,20 @@ cd backend
 .venv/bin/alembic upgrade head
 ```
 
+To install the schema, SQL Server stored procedures, and all built-in demo
+data in one idempotent command, run the seeder:
+
+```bash
+cd backend
+.venv/bin/python seed.py
+```
+
+The seeder applies outstanding Alembic migrations first, then creates the
+Companies A–C sample sales, clients, employees, and three payroll months.
+Running it again does not duplicate the demo data. Stored procedures are
+installed by the migrations when `DB_DIALECT=mssql`; MySQL does not support
+the SQL Server procedure definitions used by this application.
+
 ### Installing ODBC Driver 18 on macOS
 
 ```bash
