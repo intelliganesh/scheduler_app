@@ -117,6 +117,7 @@ class WorkflowService:
                     db.add(SampleSale(company_id=company.id, product_name=product, quantity=index * 4, amount=float(index * 125.5), sale_date=now))
             db.commit()
         self.seed_payroll(db, companies)
+        self.seed_paydates(db)
         self.seed_clients(db, companies)
 
     def seed_clients(self, db: Session, companies: list[Company]) -> None:
@@ -137,12 +138,22 @@ class WorkflowService:
         for company_index, company in enumerate(companies, start=1):
             for index in range(12):
                 department, designation = departments[index % len(departments)]
-                employee = Employee(employee_code=f"D{company_index:02d}-{index + 1:04d}", employee_name=names[(company_index * 12 + index) % len(names)], company_id=company.id, department=department, designation=designation, is_active=True)
+                employee = Employee(employee_code=f"D{company_index:02d}-{index + 1:04d}", employee_name=names[(company_index * 12 + index) % len(names)], company_id=company.id, department=department, designation=designation, paydate=current_month.replace(day=28), is_active=True)
                 db.add(employee); db.flush()
                 for month_index, month in enumerate(months):
                     basic = Decimal(4200 + company_index * 275 + index * 85 + month_index * 20)
                     allowance = (basic * Decimal("0.12")).quantize(Decimal("0.01")); deduction = (basic * Decimal("0.07")).quantize(Decimal("0.01"))
                     db.add(Payroll(employee_id=employee.id, payroll_month=month, basic_salary=basic, allowances=allowance, deductions=deduction, net_salary=basic + allowance - deduction, payment_status="Paid" if month_index < 2 else "Processing"))
+        db.commit()
+
+    def seed_paydates(self, db: Session) -> None:
+        """Backfill the monthly payment date for employees from older seeds."""
+        paydate = datetime(datetime.now().year, datetime.now().month, 28)
+        employees_without_paydate = db.query(Employee).filter(Employee.paydate.is_(None)).all()
+        if not employees_without_paydate:
+            return
+        for employee in employees_without_paydate:
+            employee.paydate = paydate
         db.commit()
 
     def create_upload(self, db: Session, original_name: str, content: bytes) -> UploadedQuery:
