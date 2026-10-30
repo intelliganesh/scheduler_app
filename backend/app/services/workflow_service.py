@@ -105,6 +105,11 @@ APPROVED_TXT_QUERY = "SELECT e.employee_code AS employee_id, e.employee_name, e.
 class WorkflowService:
     def __init__(self, repository: WorkflowRepository | None = None): self.repository = repository or WorkflowRepository()
 
+    @staticmethod
+    def _seed_paydate(index: int, current_month: datetime) -> datetime:
+        """Return one of four deterministic payment dates for demo employees."""
+        return current_month.replace(day=(7, 14, 21, 28)[index % 4])
+
     def seed(self, db: Session) -> None:
         companies = db.query(Company).order_by(Company.id).all()
         if not companies:
@@ -138,7 +143,7 @@ class WorkflowService:
         for company_index, company in enumerate(companies, start=1):
             for index in range(12):
                 department, designation = departments[index % len(departments)]
-                employee = Employee(employee_code=f"D{company_index:02d}-{index + 1:04d}", employee_name=names[(company_index * 12 + index) % len(names)], company_id=company.id, department=department, designation=designation, paydate=current_month.replace(day=28), is_active=True)
+                employee = Employee(employee_code=f"D{company_index:02d}-{index + 1:04d}", employee_name=names[(company_index * 12 + index) % len(names)], company_id=company.id, department=department, designation=designation, paydate=self._seed_paydate(index, current_month), is_active=True)
                 db.add(employee); db.flush()
                 for month_index, month in enumerate(months):
                     basic = Decimal(4200 + company_index * 275 + index * 85 + month_index * 20)
@@ -147,13 +152,13 @@ class WorkflowService:
         db.commit()
 
     def seed_paydates(self, db: Session) -> None:
-        """Backfill the monthly payment date for employees from older seeds."""
-        paydate = datetime(datetime.now().year, datetime.now().month, 28)
-        employees_without_paydate = db.query(Employee).filter(Employee.paydate.is_(None)).all()
-        if not employees_without_paydate:
+        """Keep seeded employees distributed across four monthly pay dates."""
+        current_month = datetime(datetime.now().year, datetime.now().month, 1)
+        employees = db.query(Employee).order_by(Employee.id).all()
+        if not employees:
             return
-        for employee in employees_without_paydate:
-            employee.paydate = paydate
+        for index, employee in enumerate(employees):
+            employee.paydate = self._seed_paydate(index, current_month)
         db.commit()
 
     def create_upload(self, db: Session, original_name: str, content: bytes) -> UploadedQuery:
