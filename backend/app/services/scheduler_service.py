@@ -1,3 +1,4 @@
+from app.utils.workflow_sql import get, records, update
 import calendar
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -60,7 +61,9 @@ class SchedulerService:
     def sync_all(self):
         db = SessionLocal()
         try:
-            for job in db.query(ReportJob).all(): self.sync_job(job)
+            for job in records(db, ReportJob, "11"):
+                self.sync_job(job)
+                update(db, job, "17", ("next_run_at",))
             # sync_job updates next_run_at from the live trigger; persist it so
             # the UI shows the scheduler's real next execution.
             db.commit()
@@ -102,14 +105,15 @@ class SchedulerService:
     def _run(self, job_id):
         db = SessionLocal()
         try:
-            job = db.get(ReportJob, job_id)
+            job = get(db, ReportJob, job_id)
             if not job or not job.enabled:
                 return
             WorkflowService().run_job(db, job_id)
-            job = db.get(ReportJob, job_id)
+            job = get(db, ReportJob, job_id)
             if job:
                 scheduled = self.scheduler.get_job(f"report-job-{job_id}")
                 job.next_run_at = None if job.recurrence == "once" else (scheduled.next_run_time if scheduled else None)
+                update(db, job, "17", ("next_run_at",))
                 db.commit()
         except Exception as exc:
             job_logger.exception("Scheduled job %s failed: %s", job_id, exc)

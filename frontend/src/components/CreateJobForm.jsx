@@ -1117,6 +1117,7 @@ export default function CreateJobForm({
                   onChange={(value) => update("schedule_type", value)}
                   options={[
                     { value: "every_1_minute", label: "Every 1 Minute" },
+                    { value: "hourly_2", label: "Every 2 Hours" },
                     { value: "daily", label: "Daily" },
                     { value: "weekly", label: "Weekly" },
                     { value: "monthly", label: "Monthly" },
@@ -1207,12 +1208,12 @@ export default function CreateJobForm({
                   />
                 </label>
                 <label>
-                  Export Split By{" "}
+                  File Name{" "}
                   <SearchableSelect
                     value={form.export_split_by || "file_name"}
                     onChange={(value) => update("export_split_by", value)}
                     options={EXPORT_SPLIT_OPTIONS}
-                    ariaLabel="Export Split By"
+                    ariaLabel="File Name"
                   />
                 </label>
               </div>

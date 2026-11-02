@@ -1,0 +1,178 @@
+-- @mssql lines are SQL Server-only clauses; QueryStore activates them for that dialect.
+
+-- 1: Database health check
+SELECT 1
+
+-- 2: Execute the Company Payroll Report stored procedure
+EXEC dbo.usp_CompanyPayrollReport
+
+-- 3: Approved TXT upload and employee payroll report
+SELECT e.employee_code AS employee_id, e.employee_name, e.department, e.designation,
+       p.payroll_month, p.basic_salary, p.allowances, p.deductions,
+       p.net_salary, p.payment_status
+FROM employees e
+JOIN payroll p ON p.employee_id = e.id
+WHERE e.company_id = :company_id
+  AND p.payroll_month = (
+      SELECT MAX(p2.payroll_month)
+      FROM payroll p2
+      JOIN employees e2 ON e2.id = p2.employee_id
+      WHERE e2.company_id = :company_id
+  )
+ORDER BY e.employee_code
+
+-- 4: Application-side mapped payroll report template
+SELECT {select_list}
+FROM employees e
+JOIN companies c ON c.id=e.company_id
+JOIN payroll p ON p.employee_id=e.id
+WHERE {where_clause}
+ORDER BY {order_by}
+
+-- 5: Find login user by username and reload the committed profile
+SELECT id, username, email, full_name, user_principal_name, given_name, surname,
+       department, title, company, permissions, is_active, created_at, updated_at
+FROM users
+WHERE username = :username
+
+-- 6: Insert a newly authenticated user while retaining database IDs and timestamps
+INSERT INTO users (
+    username, email, full_name, user_principal_name, given_name, surname,
+    department, title, company, permissions, is_active
+)
+VALUES (
+    :username, :email, :full_name, :user_principal_name, :given_name, :surname,
+    :department, :title, :company, :permissions, :is_active
+)
+
+-- 7: Update an authenticated user's profile and modification timestamp
+UPDATE users
+SET email = :email,
+    full_name = :full_name,
+    user_principal_name = :user_principal_name,
+    given_name = :given_name,
+    surname = :surname,
+    department = :department,
+    title = :title,
+    company = :company,
+    permissions = :permissions,
+    is_active = :is_active,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :user_id
+
+-- 8: List or find companies, optionally restricted to selected IDs
+SELECT id, company_name
+FROM companies
+WHERE (:record_id IS NULL OR id = :record_id)
+  AND (:filter_company_ids = 0 OR id IN :company_ids)
+ORDER BY company_name
+
+-- 9: List clients for a company
+SELECT id, company_id, client_code, client_name FROM clients WHERE company_id = :company_id ORDER BY client_name
+
+-- 10: List email addresses for a client or company
+SELECT ce.id, ce.client_id, ce.email
+FROM client_emails ce
+JOIN clients c ON c.id = ce.client_id
+WHERE (:client_id IS NULL OR ce.client_id = :client_id)
+  AND (:company_id IS NULL OR c.company_id = :company_id)
+ORDER BY ce.email
+
+-- 11: List jobs, find a job, or load jobs for the scheduler
+SELECT *
+FROM report_jobs
+WHERE (:record_id IS NULL OR id = :record_id)
+ORDER BY id DESC
+
+-- 12: Find or reload uploaded column-list metadata
+SELECT * FROM uploaded_queries WHERE id = :record_id
+
+-- 13: Insert uploaded column-list metadata
+INSERT INTO uploaded_queries (original_name, stored_name, approved_key, column_names)
+-- @mssql OUTPUT INSERTED.id
+VALUES (:original_name, :stored_name, :approved_key, :column_names)
+
+-- 14: Create a report job
+INSERT INTO report_jobs (
+    title, display_name, company_id, source_type, source_key, uploaded_query_id,
+    column_mappings, delimiter, schedule_time, schedule_at, recurrence, day_of_week,
+    day_of_month, recipients, client_selections, export_split_by, report_options, enabled,
+    next_run_at, updated_at
+)
+-- @mssql OUTPUT INSERTED.id
+VALUES (
+    :title, :display_name, :company_id, :source_type, :source_key, :uploaded_query_id,
+    :column_mappings, :delimiter, :schedule_time, :schedule_at, :recurrence, :day_of_week,
+    :day_of_month, :recipients, :client_selections, :export_split_by, :report_options, :enabled,
+    :next_run_at, CURRENT_TIMESTAMP
+)
+
+-- 15: Update a report job configuration and schedule
+UPDATE report_jobs
+SET title = :title,
+    display_name = :display_name,
+    company_id = :company_id,
+    source_type = :source_type,
+    source_key = :source_key,
+    uploaded_query_id = :uploaded_query_id,
+    column_mappings = :column_mappings,
+    delimiter = :delimiter,
+    schedule_time = :schedule_time,
+    schedule_at = :schedule_at,
+    recurrence = :recurrence,
+    day_of_week = :day_of_week,
+    day_of_month = :day_of_month,
+    recipients = :recipients,
+    client_selections = :client_selections,
+    export_split_by = :export_split_by,
+    report_options = :report_options,
+    enabled = :enabled,
+    next_run_at = :next_run_at,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :record_id
+
+-- 16: Enable or disable a report job
+UPDATE report_jobs
+SET enabled = :enabled, updated_at = CURRENT_TIMESTAMP
+WHERE id = :record_id
+
+-- 17: Save the scheduler next execution time
+UPDATE report_jobs
+SET next_run_at = :next_run_at, updated_at = CURRENT_TIMESTAMP
+WHERE id = :record_id
+
+-- 18: List execution history, find a run, or filter failures by cutoff
+SELECT *
+FROM job_runs
+WHERE (:record_id IS NULL OR id = :record_id)
+  AND (:failed_before IS NULL OR (status IN :statuses AND started_at <= :failed_before))
+ORDER BY id DESC
+
+-- 19: Create a report execution run
+INSERT INTO job_runs (job_id, status, current_step, error_message, step_log, csv_content, output_manifest, completed_at)
+-- @mssql OUTPUT INSERTED.id
+VALUES (:job_id, :status, :current_step, :error_message, :step_log, :csv_content, :output_manifest, :completed_at)
+
+-- 20: Save execution progress output and completion state
+UPDATE job_runs
+SET status = :status, current_step = :current_step, error_message = :error_message,
+    step_log = :step_log, csv_content = :csv_content, output_manifest = :output_manifest,
+    completed_at = :completed_at
+WHERE id = :record_id
+
+-- 21: List generated files or find a file by file ID or execution run
+SELECT *
+FROM generated_files
+WHERE (:record_id IS NULL OR id = :record_id)
+  AND (:run_id IS NULL OR run_id = :run_id)
+ORDER BY id DESC
+
+-- 22: Insert generated report file metadata
+INSERT INTO generated_files (run_id, job_id, company_id, file_name, storage_path, row_count, file_size)
+-- @mssql OUTPUT INSERTED.id
+VALUES (:run_id, :job_id, :company_id, :file_name, :storage_path, :row_count, :file_size)
+
+-- 23: Save the latest execution status on its report job
+UPDATE report_jobs
+SET last_run_status = :last_run_status, updated_at = CURRENT_TIMESTAMP
+WHERE id = :record_id

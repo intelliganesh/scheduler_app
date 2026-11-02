@@ -1,3 +1,4 @@
+from app.utils.workflow_sql import refresh, update
 from app.schemas.workflow import JobCreate, RunRead
 from app.services.workflow_service import APPROVED_PROCEDURES, MAPPING_FIELDS, MAPPING_PROCEDURE, WorkflowService
 from app.services.scheduler_service import get_scheduler
@@ -19,7 +20,7 @@ class WorkflowController:
         scheduler = get_scheduler()
         if scheduler.scheduler.running:
             scheduler.sync_job(job)
-            db.commit(); db.refresh(job)
+            update(db, job, "17", ("next_run_at",)); db.commit(); refresh(db, job)
         return job
     def create_job(self, db, payload: JobCreate):
         return self._sync(db, self.service.create_job(db, payload))

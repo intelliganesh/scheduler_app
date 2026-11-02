@@ -248,6 +248,55 @@ Example request body:
 { "title": "Quarterly summary", "description": "Example report" }
 ```
 
+## Numbered SQL queries: login, health, and Jobs
+
+SQL is loaded from `backend/app/queries/queries.txt` using `QueryStore.get(number)`
+(integer or string). Each section contains a complete statement or report template;
+there are no separate column-assignment or separator sections.
+
+- **1**: database health check.
+- **5–7**: user lookup/reload, insert, and profile update.
+
+All query IDs run consecutively from **1 to 23** in file order.
+The Jobs catalog contains **16 definitions**, down from 29. Shared lookups use bound
+optional filters instead of separate list/detail/scheduler queries:
+
+| Area | Query IDs |
+| --- | --- |
+| Companies, clients, and email lookup APIs | 8, 9, 10 |
+| Jobs: read, create, edit, toggle, next execution, execution status | 11, 14, 15, 16, 17, 23 |
+| Upload metadata: read and create | 12, 13 |
+| Execution runs: read/filter, create, update | 18, 19, 20 |
+| Generated files: read/filter and create | 21, 22 |
+
+- **2**: the app's only stored-procedure call: `dbo.usp_CompanyPayrollReport`.
+- **3–4**: portable payroll SQL and the uploaded-column mapping SELECT template.
+
+Uploaded Column Mapping is an internal report mode, not another stored procedure.
+TXT/Excel mapping, filters, formats, H/D/T layouts, and split exports execute through
+application SQL. Extra demo stored-procedure choices and runtime calls are removed.
+
+Each INSERT is defined once. Its `-- @mssql OUTPUT INSERTED.id` line is activated by
+`QueryStore.get(number, dialect="mssql")`; it is omitted for MySQL/SQLite, which use
+their driver-generated IDs. The shared INSERT body stays in the text file. Values remain bound parameters, including selected
+company-ID lists. Dynamic report projections, filters, and ordering retain their
+validated field/operator allowlists. `workflow_sql.py` provides typed result handling
+and session-associated model hydration without ORM-generated Jobs reads or writes.
+Existing commit boundaries, database defaults/timestamps, scheduling rules, CSV/ZIP
+formats, and retry-output reuse are retained. Unchanged configurations skip updates.
+The query file is cached and reloads when its modification timestamp changes.
+Configuration edits, toggles, scheduler updates, and execution-status updates retain
+separate statements so a background operation cannot overwrite a concurrent user
+edit. Combining these or unrelated table writes solely to reduce section numbers
+would add generic SQL or multi-statement batches rather than remove duplicate logic.
+
+The removed sample-sales SELECT is no longer a fallback for unsupported report
+sources; those now return an explicit unsupported-source error. Historical migrations
+retain their original procedure definitions; the current app does not call them.
+Dashboard counts, Deletion Center SQL,
+standalone report CRUD, historical migrations, and test setup remain outside these
+step-by-step migrations. Seeding is unchanged.
+
 ## Development notes
 
 `routes → controllers → services → repositories → models` keeps HTTP concerns, business rules, and database access separate without adding unnecessary layers. The React page uses one centralized `services/api.js` client and the `useReports` hook to call the FastAPI API. CORS origins are configured through `CORS_ORIGINS` in the backend environment file.
@@ -261,9 +310,9 @@ With `AUTH_MODE=mock` in the process environment (for example, `AUTH_MODE=mock .
 | `demo_viewer` | `DemoViewer!2026` | Limited: Generated Files (read-only downloads) |
 | `demo_admin` | `DemoAdmin!2026` | All configured application menus |
 
-Mock passwords are development-only values in `backend/app/services/mock_auth_service.py`; do not use them in production. The Create Job page uses one form with the five job fields: Job Name, Schedule Date & Time, Company, Email Recipients, and Stored Procedure. Email Recipients are optional; enter an address and press Enter or comma, or paste a comma-separated list. Addresses are trimmed, validated, deduplicated case-insensitively, and stored as a JSON array in the existing `report_jobs.recipients` text column. The limit is configurable with `MAX_EMAIL_RECIPIENTS` (default 10). Removing a chip updates the list; no SMTP delivery is performed. Selecting **Mapped Employee Payroll Report** reveals the TXT upload and mapping section. The **Create & Schedule Job** button creates a one-time job; schedules use Asia/Kolkata and run while the backend is running. The legacy TXT query upload remains available through the separate `/api/uploads/query` endpoint.
+Mock passwords are development-only values in `backend/app/services/mock_auth_service.py`; do not use them in production. The Create Job page uses one form with the five job fields: Job Name, Schedule Date & Time, Company, Email Recipients, and Stored Procedure. Email Recipients are optional; enter an address and press Enter or comma, or paste a comma-separated list. Addresses are trimmed, validated, deduplicated case-insensitively, and stored as a JSON array in the existing `report_jobs.recipients` text column. The limit is configurable with `MAX_EMAIL_RECIPIENTS` (default 10). Removing a chip updates the list; no SMTP delivery is performed. Uploading a TXT or Excel column list enables the **Uploaded Column Mapping** report mode. The **Create & Schedule Job** button creates a one-time job; schedules use Asia/Kolkata and run while the backend is running. The legacy TXT query upload remains available through the separate `/api/uploads/query` endpoint.
 
-The mapping flow accepts either a UTF-8 `.txt` file with one output column name per line or an `.xlsx`/`.xlsm` workbook containing `record type` and `column name` columns. A ready-to-upload example is `samples/mapped_payroll_columns.xlsx`. Excel uploads retain the H/D/T record type and the New Job form displays a four-column mapping table: Column Name, Record Type, DB Column Name, and Format (Text, TextPhone, or Date). Record Type can be adjusted with its H/D/T dropdown. The form also provides a Select Delimiter dropdown (Comma, Pipe, Semicolon, or Tab); comma is the default for new and legacy jobs. Map every extracted name to an approved database field using the searchable selectors, choose formats as needed, create a future job, wait for the scheduler, then inspect `/api/runs` and `/api/files`. The backend persists the ordered names, delimiter, and mapping JSON on the job and passes both `@company_id` and `@column_mappings` to SQL Server's `dbo.usp_GenerateMappedPayrollReport`. Legacy `display_name`/`database_field` mappings remain compatible; uploaded files are never executed as SQL.
+The mapping flow accepts either a UTF-8 `.txt` file with one output column name per line or an `.xlsx`/`.xlsm` workbook containing `record type` and `column name` columns. A ready-to-upload example is `samples/mapped_payroll_columns.xlsx`. Excel uploads retain the H/D/T record type and the New Job form displays a four-column mapping table: Column Name, Record Type, DB Column Name, and Format (Text, TextPhone, or Date). Record Type can be adjusted with its H/D/T dropdown. The form also provides a Select Delimiter dropdown (Comma, Pipe, Semicolon, or Tab); comma is the default for new and legacy jobs. Map every extracted name to an approved database field using the searchable selectors, choose formats as needed, create a future job, wait for the scheduler, then inspect `/api/runs` and `/api/files`. The backend persists the ordered names, delimiter, and mapping JSON on the job and uses the application-side mapping SELECT with bound company/filter values. Legacy `display_name`/`database_field` mappings remain compatible; uploaded files are never executed as SQL.
 
 ### Admin dashboard
 
@@ -272,7 +321,7 @@ The admin-only Deletion Center removes application-created report jobs, their ex
 
 ## Local workflow demonstration
 
-For the home demonstration, set `AUTH_MODE=mock` in local `backend/.env` (never in production), then sign in with either documented mock account. Menu-to-group mappings are maintained in the two mode-specific YAML files above. After SQL Server migrations are applied, the app idempotently seeds Companies A–C, fictional employees, and three payroll months. The Jobs screen opens the existing one-form job creator in a drawer and combines scheduled jobs, status filters, run/enable actions, details, and execution history. The approved procedure registry exposes Mapped Employee Payroll Report plus Employee Payroll Report, Monthly Payroll Summary, Department-wise Payroll Report, Employee Salary Breakdown, and Company Payroll Report. The mapping-aware procedure is the only procedure advertised with dynamic field selection; the separate legacy TXT upload path still accepts only the documented read-only payroll query. Generated payroll CSVs are stored in `generated_reports/`; email delivery is intentionally not implemented. Error logs are stored in `logs/frontend`, `logs/backend`, and `logs/jobs` by default. Set `LOG_DIR` in `backend/.env` to move the complete log folder, for example `LOG_DIR=/var/log/generate-report`. Schedules use Asia/Kolkata and run only while the application is running. All demo identities and payroll values are fictional.
+For the home demonstration, set `AUTH_MODE=mock` in local `backend/.env` (never in production), then sign in with either documented mock account. Menu-to-group mappings are maintained in the two mode-specific YAML files above. After SQL Server migrations are applied, the app idempotently seeds Companies A–C, fictional employees, and three payroll months. The Jobs screen opens the existing one-form job creator in a drawer and combines scheduled jobs, status filters, run/enable actions, details, and execution history. The report registry exposes Company Payroll Report and Uploaded Column Mapping. Only Company Payroll Report invokes a database stored procedure; uploaded mapping uses application-side SQL for dynamic fields; the separate legacy TXT upload path still accepts only the documented read-only payroll query. Generated payroll CSVs are stored in `generated_reports/`; email delivery is intentionally not implemented. Error logs are stored in `logs/frontend`, `logs/backend`, and `logs/jobs` by default. Set `LOG_DIR` in `backend/.env` to move the complete log folder, for example `LOG_DIR=/var/log/generate-report`. Schedules use Asia/Kolkata and run only while the application is running. All demo identities and payroll values are fictional.
 
 ## Local tests
 
@@ -301,4 +350,4 @@ Mapped Excel configurations may assign columns to H (Header), D (Detail), or T (
 
 The New Job wizard offers Daily, Weekly, and Monthly schedules. The API still accepts the legacy One Time, Every 2 Minutes, and Every 1/2/4 Hours types for existing jobs; opening such a job in the editor normalizes it to Daily. Execution Date and Time (Asia/Kolkata) must be in the future and are the first eligible run for every schedule type. Weekly uses the selected weekday (Sunday–Saturday) and Monthly uses the selected day of month, falling back to the month's last day. Recurring schedules use APScheduler cron/interval triggers, coalesced missed runs, and a five-minute misfire grace period. A job runs at most once at a time: a manual or scheduled run requested while the same job is executing is rejected.
 
-Filters and Export Split By options other than File Name require an uploaded column list (Mapped Employee Payroll Report). Text conditions (contains, starts with, ends with, does not contain) apply only to text fields. All-detail layouts always include a header row; H/D/T layouts write header, detail, and trailer records. "File Name + …" split options group like their counterparts and prefix each CSV member with the job's file name.
+Filters and Export Split By options other than File Name require an uploaded column list (Uploaded Column Mapping). Text conditions (contains, starts with, ends with, does not contain) apply only to text fields. All-detail layouts always include a header row; H/D/T layouts write header, detail, and trailer records. "File Name + …" split options group like their counterparts and prefix each CSV member with the job's file name.
