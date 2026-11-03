@@ -2,7 +2,7 @@ from sqlalchemy import func, select
 from app.utils.workflow_sql import get, records
 from sqlalchemy.orm import Session
 
-from app.models.workflow import Client, ClientEmail, Company, GeneratedFile, JobRun, ReportJob, SampleSale, UploadedQuery
+from app.models.workflow import Client, ClientEmail, Company, GeneratedFile, JobRun, ReportJob, UploadedQuery
 
 
 class WorkflowRepository:

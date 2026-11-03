@@ -4,7 +4,7 @@
 SELECT 1
 
 -- 2: Execute the Company Payroll Report stored procedure
-EXEC dbo.usp_CompanyPayrollReport
+EXEC {procedure_name}
 
 -- 3: Approved TXT upload and employee payroll report
 SELECT e.employee_code AS employee_id, e.employee_name, e.department, e.designation,
@@ -176,3 +176,6 @@ VALUES (:run_id, :job_id, :company_id, :file_name, :storage_path, :row_count, :f
 UPDATE report_jobs
 SET last_run_status = :last_run_status, updated_at = CURRENT_TIMESTAMP
 WHERE id = :record_id
+
+-- 24: Validate that the configured report stored procedure exists
+SELECT OBJECT_ID(:procedure_name, 'P') AS procedure_id

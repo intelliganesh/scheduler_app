@@ -28,16 +28,6 @@ class ClientEmail(Base):
     email: Mapped[str] = mapped_column(String(255))
 
 
-class SampleSale(Base):
-    __tablename__ = "sample_sales"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
-    product_name: Mapped[str] = mapped_column(String(160))
-    quantity: Mapped[int] = mapped_column(Integer)
-    amount: Mapped[float] = mapped_column(nullable=False)
-    sale_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-
-
 class Employee(Base):
     __tablename__ = "employees"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -107,6 +97,7 @@ class ReportJob(Base):
     def schedule_type(self) -> str:
         if self.recurrence == "once": return "one_time"
         if self.recurrence == "every_2_minutes": return "every_2_minutes"
+        if self.recurrence == "every_30_minutes": return "every_30_minutes"
         if self.recurrence.startswith("hourly_"): return self.recurrence
         return self.recurrence
 

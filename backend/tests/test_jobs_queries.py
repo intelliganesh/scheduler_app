@@ -254,6 +254,13 @@ class JobsQueryTests(unittest.TestCase):
         self.assertEqual(next_run, start + timedelta(hours=6))
         self.assertEqual(next_run.strftime("%Y-%m-%d %H:%M"), "2026-11-03 05:30")
 
+    def test_thirty_minute_and_one_hour_schedule_intervals(self):
+        start = datetime(2026, 11, 3, 10, 0, tzinfo=KOLKATA)
+        half_hour = SchedulerService.build_trigger(SimpleNamespace(recurrence="every_30_minutes", schedule_at=start.replace(tzinfo=None)))
+        one_hour = SchedulerService.build_trigger(SimpleNamespace(recurrence="hourly_1", schedule_at=start.replace(tzinfo=None)))
+        self.assertEqual(half_hour.interval, timedelta(minutes=30))
+        self.assertEqual(one_hour.interval, timedelta(hours=1))
+
     def test_smtp_failure_preserves_report_and_retry_reuses_it(self):
         settings = Settings(_env_file=None, smtp_enabled=True, generated_reports_dir=f"{self.folder.name}/reports")
         job_id = self.service.create_job(self.db, self.payload(
@@ -282,7 +289,7 @@ class JobsQueryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no longer belongs"):
             self.service._email_recipients(self.db, job)
 
-    def test_unsupported_sources_do_not_execute_removed_sample_sales_query(self):
+    def test_unsupported_sources_are_rejected(self):
         job = self.service.create_job(self.db, self.payload())
         # A historical source is not offered by the current Jobs form.
         with self.assertRaisesRegex(ValueError, "Unsupported report source"):
@@ -498,3 +505,19 @@ class JobsSqlServerQueryTests(unittest.TestCase):
         self.assertEqual(run.status, "Completed")
         self.assertIn("Employee", run.csv_content)
         self.assert_catalog_only()
+
+    def test_invalid_configured_procedure_blocks_uploaded_mapping(self):
+        uploaded = self.service.create_upload(self.db, "columns.txt", b"Employee\nSalary")
+        self.upload_id = uploaded.id
+        job = self.service.create_job(self.db, self.payload(source_key="mapped_employee_payroll_report", uploaded_query_id=uploaded.id,
+                    client_selections={str(self.company_id): []},
+                    column_mappings=[{"column_name": "Employee", "db_column_name": ["employee_name"]},
+                                     {"column_name": "Salary", "db_column_name": ["net_salary"]}]))
+        self.job_id = job.id
+        invalid_settings = get_settings().model_copy(update={"report_procedure_name": "dbo.DoesNotExist"})
+        with patch("app.services.workflow_service.get_settings", return_value=invalid_settings):
+            with self.assertRaisesRegex(ValueError, "Configured report procedure 'dbo.DoesNotExist' was not found"):
+                self.service.run_job(self.db, self.job_id)
+        failed_run = self.db.query(JobRun).filter(JobRun.job_id == self.job_id).one()
+        self.assertEqual(failed_run.status, "Failed")
+        self.assertIsNone(failed_run.csv_content)

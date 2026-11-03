@@ -75,7 +75,14 @@ DB_NAME=generate_report
 DB_USER=report_user
 DB_PASSWORD=your-password
 MSSQL_DRIVER=ODBC Driver 18 for SQL Server
+# Procedure used by Company Payroll Report jobs.
+REPORT_PROCEDURE_NAME=dbo.usp_CompanyPayrollReport
 ```
+
+Report procedure names are read from `REPORT_PROCEDURE_NAME` when the backend
+starts. On SQL Server, the procedure is validated before each report run; an
+invalid name fails the run before a file or email is created. Restart the
+backend after changing environment values.
 
 ## External Microsoft SQL Server
 
@@ -97,7 +104,7 @@ cd backend
 ```
 
 The seeder applies outstanding Alembic migrations first, then creates the
-Companies A–C sample sales, clients, employees, and three payroll months.
+Companies A–C, clients, employees, and three payroll months.
 Running it again does not duplicate the demo data. Stored procedures are
 installed by the migrations when `DB_DIALECT=mssql`; MySQL does not support
 the SQL Server procedure definitions used by this application.
@@ -269,7 +276,7 @@ optional filters instead of separate list/detail/scheduler queries:
 | Execution runs: read/filter, create, update | 18, 19, 20 |
 | Generated files: read/filter and create | 21, 22 |
 
-- **2**: the app's only stored-procedure call: `dbo.usp_CompanyPayrollReport`.
+- **2**: the app's stored-procedure call. Its identifier comes from `REPORT_PROCEDURE_NAME` (default: `dbo.usp_CompanyPayrollReport`).
 - **3–4**: portable payroll SQL and the uploaded-column mapping SELECT template.
 
 Uploaded Column Mapping is an internal report mode, not another stored procedure.
@@ -321,7 +328,7 @@ The admin-only Deletion Center removes application-created report jobs, their ex
 
 ## Local workflow demonstration
 
-For the home demonstration, set `AUTH_MODE=mock` in local `backend/.env` (never in production), then sign in with either documented mock account. Menu-to-group mappings are maintained in the two mode-specific YAML files above. After SQL Server migrations are applied, the app idempotently seeds Companies A–C, fictional employees, and three payroll months. The Jobs screen opens the existing one-form job creator in a drawer and combines scheduled jobs, status filters, run/enable actions, details, and execution history. The report registry exposes Company Payroll Report and Uploaded Column Mapping. Only Company Payroll Report invokes a database stored procedure; uploaded mapping uses application-side SQL for dynamic fields; the separate legacy TXT upload path still accepts only the documented read-only payroll query. Generated payroll CSVs are stored in `generated_reports/`; optional SMTP delivery attaches the generated CSV or ZIP after file storage. Error logs are stored in `logs/frontend`, `logs/backend`, and `logs/jobs` by default. Set `LOG_DIR` in `backend/.env` to move the complete log folder, for example `LOG_DIR=/var/log/generate-report`. Schedules use Asia/Kolkata and run only while the application is running. All demo identities and payroll values are fictional.
+For the home demonstration, set `AUTH_MODE=mock` in local `backend/.env` (never in production), then sign in with either documented mock account. Menu-to-group mappings are maintained in the two mode-specific YAML files above. After SQL Server migrations are applied, the app idempotently seeds Companies A–C, fictional employees, and three payroll months. The Jobs screen opens the existing one-form job creator in a drawer and combines scheduled jobs, status filters, run/enable actions, details, and execution history. The report registry exposes Company Payroll Report and Uploaded Column Mapping. Only Company Payroll Report invokes a database stored procedure; uploaded mapping uses application-side SQL for dynamic fields; the separate legacy TXT upload path still accepts only the documented read-only payroll query. Generated payroll CSVs are stored in `generated_reports/`; optional SMTP delivery attaches the generated CSV or ZIP after file storage. All application, job, and browser validation logs are written to `logs/application.log` in a timestamped, component-labeled format; set `LOG_DIR` or `LOG_FILE_NAME` in `backend/.env` to relocate or rename it. The file rotates after 10 MB and keeps five backups. Schedules use Asia/Kolkata and run only while the application is running. All demo identities and payroll values are fictional.
 
 ## Local tests
 

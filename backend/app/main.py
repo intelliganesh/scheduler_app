@@ -16,7 +16,7 @@ from app.services.scheduler_service import get_scheduler
 from app.utils.exceptions import DatabaseOperationError
 
 settings = get_settings()
-configure_logging(settings.log_dir)
+configure_logging(settings.log_dir, settings.log_file_name)
 backend_logger = logging.getLogger("app")
 
 

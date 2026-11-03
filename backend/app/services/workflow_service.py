@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.config.settings import get_settings
 from app.services.email_service import send_report, send_report_content
-from app.models.workflow import Client, ClientEmail, Company, Employee, GeneratedFile, JobRun, Payroll, ReportJob, SampleSale, UploadedQuery
+from app.models.workflow import Client, ClientEmail, Company, Employee, GeneratedFile, JobRun, Payroll, ReportJob, UploadedQuery
 from app.repositories.workflow_repository import WorkflowRepository
 from app.utils.query_store import query_store
 from app.utils.workflow_sql import JOB_FIELDS, RUN_FIELDS, get, insert, one, records, refresh, update
@@ -113,11 +113,6 @@ class WorkflowService:
         if not companies:
             companies = [Company(company_name=name) for name in ("Company A", "Company B", "Company C")]
             db.add_all(companies); db.flush()
-            # Keep the original sample rows intact for existing historical jobs.
-            now = datetime.now()
-            for company in companies:
-                for index, product in enumerate(("Widget", "Gadget", "Service"), start=1):
-                    db.add(SampleSale(company_id=company.id, product_name=product, quantity=index * 4, amount=float(index * 125.5), sale_date=now))
             db.commit()
         self.seed_payroll(db, companies)
         self.seed_paydates(db)
@@ -294,7 +289,7 @@ class WorkflowService:
             if filter_rules:
                 raise ValueError("Filters require an uploaded column list (Mapped Employee Payroll Report).")
         values["report_options"] = json.dumps({"sort_rules": sort_rules, "filter_rules": filter_rules, "sort_field": payload.sort_field, "sort_direction": payload.sort_direction, "filter_field": payload.filter_field, "filter_operator": payload.filter_operator, "filter_value": str(payload.filter_value) if payload.filter_value is not None else None}, ensure_ascii=False)
-        recurrence = {"one_time": "once", "every_1_minute": "every_1_minute", "every_2_minutes": "every_2_minutes", "hourly_1": "hourly_1", "hourly_2": "hourly_2", "hourly_4": "hourly_4", "daily": "daily", "weekly": "weekly", "monthly": "monthly"}[payload.schedule_type]
+        recurrence = {"one_time": "once", "every_1_minute": "every_1_minute", "every_2_minutes": "every_2_minutes", "every_30_minutes": "every_30_minutes", "hourly_1": "hourly_1", "hourly_2": "hourly_2", "hourly_4": "hourly_4", "daily": "daily", "weekly": "weekly", "monthly": "monthly"}[payload.schedule_type]
         if payload.schedule_type == "weekly" and payload.weekly_day is None: raise ValueError("Choose a day of the week for weekly schedules.")
         if payload.schedule_type == "monthly" and payload.monthly_day is None: raise ValueError("Choose a day of the month for monthly schedules.")
         values["schedule_at"] = schedule_at
@@ -374,6 +369,9 @@ class WorkflowService:
         if not is_new and run.status == "Running": raise ValueError("This run is already active.")
         run.status = "Running"; run.error_message = None
         try:
+            # Validate even when retrying a run that already has stored output;
+            # an invalid environment procedure must never reach email delivery.
+            self._ensure_report_procedure_available(db)
             if not run.csv_content and not run.output_manifest:
                 if job.export_split_by and (job.export_split_by != "file_name" or len(self._selected_company_ids(job)) > 1):
                     split_outputs = self._execute_split_source(db, job)
@@ -480,15 +478,36 @@ class WorkflowService:
                 sent = True
         return sent
 
+    @staticmethod
+    def _configured_procedure_name() -> str:
+        procedure_name = get_settings().report_procedure_name.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?", procedure_name):
+            raise ValueError("REPORT_PROCEDURE_NAME must be a safe SQL procedure name, optionally qualified with a schema.")
+        return procedure_name
+
+    def _ensure_report_procedure_available(self, db: Session) -> str:
+        """Validate the environment-selected procedure before any report source runs."""
+        procedure_name = self._configured_procedure_name()
+        # The configured procedure is a SQL Server feature. Preserve the
+        # existing portable TXT fallback when the app is run on MySQL/SQLite.
+        if db.bind.dialect.name != "mssql":
+            return procedure_name
+        procedure_id = db.execute(
+            text(query_store.get("24")),
+            {"procedure_name": procedure_name},
+        ).scalar_one_or_none()
+        if procedure_id is None:
+            raise ValueError(f"Configured report procedure '{procedure_name}' was not found.")
+        return procedure_name
+
     def _execute_source(self, db: Session, job: ReportJob):
+        procedure_name = self._configured_procedure_name()
         if job.source_key == MAPPING_PROCEDURE:
             # Upload mapping/filtering/splitting uses the existing application SQL.
             return self._execute_application_mapping(db, job)
         if job.source_type == "procedure" and job.source_key == "company_payroll_report":
             if db.bind.dialect.name == "mssql":
-                # Preserve the existing parameterless company procedure and its
-                # selected-company filtering without altering its definition.
-                result = db.execute(text(query_store.get("2")))
+                result = db.execute(text(query_store.get("2").format(procedure_name=procedure_name)))
                 rows = [tuple(row) for row in result.fetchmany(get_settings().max_report_rows)]
                 selected_ids = self._selected_company_ids(job) or [job.company_id]
                 companies = records(db, Company, "8", {"company_ids": selected_ids, "filter_company_ids": True})

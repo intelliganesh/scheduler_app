@@ -60,9 +60,11 @@ class Settings(BaseSettings):
     generated_reports_dir: str = "../generated_reports"
     uploads_dir: str = "uploads"
     log_dir: str = "../logs"
+    log_file_name: str = "application.log"
     max_report_rows: int = 1000
     max_upload_bytes: int = 16384
     max_email_recipients: int = 10
+    report_procedure_name: str = "dbo.usp_CompanyPayrollReport"
     smtp_enabled: bool = False
     smtp_host: str = ""
     smtp_port: int = 587

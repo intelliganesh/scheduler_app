@@ -77,6 +77,8 @@ class SchedulerService:
             return IntervalTrigger(minutes=1, start_date=job.schedule_at, timezone=KOLKATA)
         if job.recurrence == "every_2_minutes":
             return IntervalTrigger(minutes=2, start_date=job.schedule_at, timezone=KOLKATA)
+        if job.recurrence == "every_30_minutes":
+            return IntervalTrigger(minutes=30, start_date=job.schedule_at, timezone=KOLKATA)
         if job.recurrence.startswith("hourly_"):
             return IntervalTrigger(hours=int(job.recurrence.split("_", 1)[1]), start_date=job.schedule_at, timezone=KOLKATA)
         hour, minute = map(int, job.schedule_time.split(":"))

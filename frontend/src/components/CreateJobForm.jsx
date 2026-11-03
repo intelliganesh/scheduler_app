@@ -580,7 +580,7 @@ export default function CreateJobForm({
         : [];
     const savedScheduleType =
       editJob.schedule_type === "once" ? "one_time" : editJob.schedule_type;
-    const scheduleType = ["one_time", "every_1_minute", "every_2_minutes", "hourly_1", "hourly_2", "hourly_4", "daily", "weekly", "monthly"].includes(
+    const scheduleType = ["one_time", "every_1_minute", "every_2_minutes", "every_30_minutes", "hourly_1", "hourly_2", "hourly_4", "daily", "weekly", "monthly"].includes(
       savedScheduleType,
     )
       ? savedScheduleType
@@ -1030,6 +1030,7 @@ export default function CreateJobForm({
     one_time: "One Time",
     every_1_minute: "Every 1 Minute",
     every_2_minutes: "Every 2 Minutes",
+    every_30_minutes: "Every 30 Minutes",
     hourly_1: "Every 1 Hour",
     hourly_2: "Every 2 Hours",
     hourly_4: "Every 4 Hours",
@@ -1117,6 +1118,8 @@ export default function CreateJobForm({
                   onChange={(value) => update("schedule_type", value)}
                   options={[
                     { value: "every_1_minute", label: "Every 1 Minute" },
+                    { value: "every_30_minutes", label: "Every 30 Minutes" },
+                    { value: "hourly_1", label: "Every 1 Hour" },
                     { value: "hourly_2", label: "Every 2 Hours" },
                     { value: "daily", label: "Daily" },
                     { value: "weekly", label: "Weekly" },
