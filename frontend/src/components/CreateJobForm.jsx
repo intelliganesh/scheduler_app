@@ -580,7 +580,7 @@ export default function CreateJobForm({
         : [];
     const savedScheduleType =
       editJob.schedule_type === "once" ? "one_time" : editJob.schedule_type;
-    const scheduleType = ["every_1_minute", "daily", "weekly", "monthly"].includes(
+    const scheduleType = ["one_time", "every_1_minute", "every_2_minutes", "hourly_1", "hourly_2", "hourly_4", "daily", "weekly", "monthly"].includes(
       savedScheduleType,
     )
       ? savedScheduleType

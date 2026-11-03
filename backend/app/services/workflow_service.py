@@ -17,6 +17,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from app.config.settings import get_settings
+from app.services.email_service import send_report, send_report_content
 from app.models.workflow import Client, ClientEmail, Company, Employee, GeneratedFile, JobRun, Payroll, ReportJob, SampleSale, UploadedQuery
 from app.repositories.workflow_repository import WorkflowRepository
 from app.utils.query_store import query_store
@@ -374,10 +375,10 @@ class WorkflowService:
         run.status = "Running"; run.error_message = None
         try:
             if not run.csv_content and not run.output_manifest:
-                if job.export_split_by and job.export_split_by != "file_name":
+                if job.export_split_by and (job.export_split_by != "file_name" or len(self._selected_company_ids(job)) > 1):
                     split_outputs = self._execute_split_source(db, job)
-                    run.output_manifest = json.dumps([{"name": name, "content": content, "rows": row_count} for name, content, row_count in split_outputs], ensure_ascii=False)
-                    run.csv_content = split_outputs[0][1] if split_outputs else ""
+                    run.output_manifest = json.dumps([{"company_id": company_id, "name": name, "content": content, "rows": row_count} for company_id, name, content, row_count in split_outputs], ensure_ascii=False)
+                    run.csv_content = split_outputs[0][2] if split_outputs else ""
                 else:
                     rows, headers = self._execute_source(db, job)
                     run.csv_content = self._csv_records(rows, job.delimiter or ",") if headers is None else self._csv(headers, rows, job.delimiter or ",")
@@ -387,6 +388,12 @@ class WorkflowService:
             run.current_step = "File storage"
             generated = self._store_file(db, job, run)
             self._log(run, "File storage", "Completed")
+            run.current_step = "Email delivery"
+            if get_settings().smtp_enabled:
+                sent = self._deliver_report(db, job, run, generated)
+                self._log(run, "Email delivery", "Completed" if sent else "Skipped (no recipients)")
+            else:
+                self._log(run, "Email delivery", "Skipped (SMTP disabled)")
             run.status = "Completed"; run.current_step = "Completed"; run.completed_at = datetime.now(); job.last_run_status = run.status
             update(db, run, "20", RUN_FIELDS); update(db, job, "23", ("last_run_status",)); db.commit(); refresh(db, run); return run
         except Exception as exc:
@@ -398,6 +405,80 @@ class WorkflowService:
             run.status = "Failed" if not run.csv_content else "Partially Completed"; run.error_message = f"Report execution failed during {step}: {reason}"
             run.current_step = step; self._log(run, run.current_step, "Failed")
             job.last_run_status = run.status; update(db, run, "20", RUN_FIELDS); update(db, job, "23", ("last_run_status",)); db.commit(); refresh(db, run); raise ValueError(run.error_message) from exc
+
+    def _email_recipients(self, db: Session, job: ReportJob) -> list[str]:
+        recipients = list(json.loads(job.recipients or "[]"))
+        for company_id, selected in json.loads(job.client_selections or "{}").items():
+            # Older saved jobs store ClientEmail IDs; constrain resolution to
+            # that selected company rather than accepting arbitrary email IDs.
+            legacy = {str(item.id): item.email for item in self.repository.company_emails(db, int(company_id))} if any(str(item).isdigit() for item in selected) else {}
+            for item in selected:
+                address = str(item).strip()
+                if address.isdigit():
+                    if address not in legacy:
+                        raise ValueError("A saved email recipient no longer belongs to its selected company. Edit the job recipients.")
+                    address = legacy[address]
+                recipients.append(address)
+        unique = {}
+        for address in recipients:
+            address = str(address).strip()
+            if not EMAIL_PATTERN.fullmatch(address):
+                raise ValueError("The job contains an invalid email recipient. Edit its recipients before retrying.")
+            unique.setdefault(address.casefold(), address)
+        return list(unique.values())
+
+    def _company_email_recipients(self, db: Session, job: ReportJob, company_id: int) -> list[str]:
+        """Resolve only the recipients assigned to one selected company."""
+        selections = json.loads(job.client_selections or "{}")
+        selected = selections.get(str(company_id), [])
+        legacy = {str(item.id): item.email for item in self.repository.company_emails(db, company_id)} if any(str(item).isdigit() for item in selected) else {}
+        addresses = []
+        for item in selected:
+            address = str(item).strip()
+            if address.isdigit():
+                if address not in legacy:
+                    raise ValueError("A saved email recipient no longer belongs to its selected company. Edit the job recipients.")
+                address = legacy[address]
+            addresses.append(address)
+        return self._normalize_email_addresses(addresses)
+
+    @staticmethod
+    def _normalize_email_addresses(addresses: list[str]) -> list[str]:
+        unique = {}
+        for address in addresses:
+            address = str(address).strip()
+            if not EMAIL_PATTERN.fullmatch(address):
+                raise ValueError("The job contains an invalid email recipient. Edit its recipients before retrying.")
+            unique.setdefault(address.casefold(), address)
+        return list(unique.values())
+
+    def _deliver_report(self, db: Session, job: ReportJob, run: JobRun, generated: GeneratedFile) -> bool:
+        """Send split files only to their company's recipients.
+
+        General recipients receive the complete generated artifact. Recipients
+        assigned to a company receive only that company's CSV from the split
+        manifest.
+        """
+        manifest = json.loads(run.output_manifest or "[]")
+        if not manifest:
+            return bool(send_report(job.title, self._email_recipients(db, job), generated.storage_path))
+        sent = False
+        global_recipients = self._normalize_email_addresses(json.loads(job.recipients or "[]"))
+        if global_recipients:
+            send_report(job.title, global_recipients, generated.storage_path)
+            sent = True
+        for item in manifest:
+            company_id = item.get("company_id")
+            if company_id is None:
+                match = re.search(r"(?:^|_)client_(\d+)(?:_|\.csv$)", str(item.get("name", "")))
+                if not match:
+                    raise ValueError("A saved split report is missing its company identity. Run the report again before emailing it.")
+                company_id = int(match.group(1))
+            recipients = self._company_email_recipients(db, job, int(company_id))
+            if recipients:
+                send_report_content(job.title, recipients, item["name"], item["content"].encode("utf-8"), ".csv")
+                sent = True
+        return sent
 
     def _execute_source(self, db: Session, job: ReportJob):
         if job.source_key == MAPPING_PROCEDURE:
@@ -473,14 +554,14 @@ class WorkflowService:
             # Pay Date exports are kept separate per selected company and pay
             # date so a company's report is never mixed with another company's
             # records that happen to share the same payroll month.
-            key = row["__client_id"] if job.export_split_by in {"client_id", "file_client"} else (row["__client_id"], row["__pay_date"])
+            key = row["__client_id"] if job.export_split_by in {"file_name", "client_id", "file_client"} else (row["__client_id"], row["__pay_date"])
             groups.setdefault(key, []).append(row)
         outputs = []
         # "File Name + …" modes keep the same grouping as their counterparts and
         # prefix every member with the job's file name.
         prefix = f"{self._job_slug(job)}_" if job.export_split_by.startswith("file_") else ""
         for key, rows in groups.items():
-            if job.export_split_by in {"client_id", "file_client"}:
+            if job.export_split_by in {"file_name", "client_id", "file_client"}:
                 safe_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(key))
                 filename = f"{prefix}client_{safe_key}_{job.id}.csv"
             else:
@@ -492,7 +573,8 @@ class WorkflowService:
             else:
                 headers, detail_rows = self._detail_table(mappings, rows)
                 content = self._csv(headers, detail_rows, job.delimiter or ",")
-            outputs.append((filename, content, len(rows)))
+            company_id = int(key if isinstance(key, int) else key[0])
+            outputs.append((company_id, filename, content, len(rows)))
         return outputs
 
     def _query_application_rows(self, db: Session, job: ReportJob):

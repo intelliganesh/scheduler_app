@@ -117,6 +117,20 @@ class SchedulerService:
                 db.commit()
         except Exception as exc:
             job_logger.exception("Scheduled job %s failed: %s", job_id, exc)
+            # The interval/cron trigger advances even when report or email
+            # delivery fails. Persist that next occurrence so the UI does not
+            # keep displaying the previous run time.
+            try:
+                db.rollback()
+                failed_job = get(db, ReportJob, job_id)
+                if failed_job:
+                    scheduled = self.scheduler.get_job(f"report-job-{job_id}")
+                    failed_job.next_run_at = None if failed_job.recurrence == "once" else (scheduled.next_run_time if scheduled else None)
+                    update(db, failed_job, "17", ("next_run_at",))
+                    db.commit()
+            except Exception:
+                db.rollback()
+                job_logger.exception("Could not persist next execution after job %s failed", job_id)
         finally: db.close()
 
 

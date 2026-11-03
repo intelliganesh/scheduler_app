@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     max_report_rows: int = 1000
     max_upload_bytes: int = 16384
     max_email_recipients: int = 10
+    smtp_enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "Report Scheduler"
+    smtp_start_tls: bool = True
+    smtp_use_ssl: bool = False
+    smtp_timeout_seconds: int = 30
 
     @property
     def sqlalchemy_url(self) -> str:

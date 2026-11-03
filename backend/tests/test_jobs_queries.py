@@ -254,6 +254,34 @@ class JobsQueryTests(unittest.TestCase):
         self.assertEqual(next_run, start + timedelta(hours=6))
         self.assertEqual(next_run.strftime("%Y-%m-%d %H:%M"), "2026-11-03 05:30")
 
+    def test_smtp_failure_preserves_report_and_retry_reuses_it(self):
+        settings = Settings(_env_file=None, smtp_enabled=True, generated_reports_dir=f"{self.folder.name}/reports")
+        job_id = self.service.create_job(self.db, self.payload(
+            recipients=["finance@example.com"], client_selections={"1": ["Finance@example.com", "manager@example.com"]})).id
+        with patch("app.services.workflow_service.get_settings", return_value=settings), patch("app.services.workflow_service.send_report", side_effect=ValueError("SMTP delivery failed")) as send:
+            with self.assertRaisesRegex(ValueError, "Email delivery"):
+                self.service.run_job(self.db, job_id)
+            self.assertEqual(send.call_args.args[1], ["finance@example.com", "manager@example.com"])
+        failed = self.service.repository.runs(self.db)[0]
+        self.assertEqual(failed.status, "Partially Completed")
+        generated = self.service.repository.files(self.db)[0]
+        self.assertTrue(Path(generated.storage_path).is_file())
+        storage_path = generated.storage_path
+        with patch("app.services.workflow_service.get_settings", return_value=settings), patch("app.services.workflow_service.send_report", return_value=True) as send, patch.object(self.service, "_execute_source", side_effect=AssertionError("Must reuse output")):
+            retried = self.service.run_job(self.db, job_id, failed.id)
+            self.assertEqual(retried.status, "Completed")
+            self.assertEqual(send.call_args.args[2], storage_path)
+        self.assertEqual(len(self.service.repository.files(self.db)), 1)
+        self.assert_catalog_only()
+
+    def test_smtp_legacy_recipient_ids_are_scoped_to_company(self):
+        job = self.service.create_job(self.db, self.payload(client_selections={"1": ["1"]}))
+        expected = self.service.repository.company_emails(self.db, 1)[0].email
+        self.assertEqual(self.service._email_recipients(self.db, job), [expected])
+        job.client_selections = json.dumps({"2": ["1"]})
+        with self.assertRaisesRegex(ValueError, "no longer belongs"):
+            self.service._email_recipients(self.db, job)
+
     def test_unsupported_sources_do_not_execute_removed_sample_sales_query(self):
         job = self.service.create_job(self.db, self.payload())
         # A historical source is not offered by the current Jobs form.
@@ -298,6 +326,41 @@ class JobsQueryTests(unittest.TestCase):
                 self.assertEqual(int(rows[-1][0]), len(rows) - 2)
                 total += len(rows) - 2
         self.assertEqual(archive.row_count, total)
+        self.assert_catalog_only()
+
+    def test_split_report_email_is_limited_to_each_company(self):
+        settings = Settings(_env_file=None, smtp_enabled=True, generated_reports_dir=f"{self.folder.name}/reports")
+        upload_id = self.service.create_upload(self.db, "columns.txt", b"Company\nEmployee").id
+        job_id = self.service.create_job(self.db, self.payload(source_key="mapped_employee_payroll_report", uploaded_query_id=upload_id,
+                    client_selections={"1": ["a@example.com"], "2": ["b@example.com"]}, export_split_by="client_id",
+                    column_mappings=[{"column_name": "Company", "db_column_name": ["company_name"]},
+                                     {"column_name": "Employee", "db_column_name": ["employee_name"]}])).id
+        with patch("app.services.workflow_service.get_settings", return_value=settings), patch("app.services.workflow_service.send_report_content") as send_content, patch("app.services.workflow_service.send_report") as send_archive:
+            send_content.return_value = True
+            run = self.service.run_job(self.db, job_id)
+        self.assertEqual(run.status, "Completed")
+        self.assertEqual(send_archive.call_count, 0)
+        deliveries = {call.args[1][0]: call.args[2] for call in send_content.call_args_list}
+        self.assertEqual(set(deliveries), {"a@example.com", "b@example.com"})
+        self.assertIn("client_1_", deliveries["a@example.com"])
+        self.assertIn("client_2_", deliveries["b@example.com"])
+        self.assert_catalog_only()
+
+    def test_file_name_with_multiple_companies_also_isolates_email_files(self):
+        settings = Settings(_env_file=None, smtp_enabled=True, generated_reports_dir=f"{self.folder.name}/reports")
+        upload_id = self.service.create_upload(self.db, "columns.txt", b"Company\nEmployee").id
+        job_id = self.service.create_job(self.db, self.payload(source_key="mapped_employee_payroll_report", uploaded_query_id=upload_id,
+                    client_selections={"1": ["a@example.com"], "2": ["b@example.com"]}, export_split_by="file_name",
+                    column_mappings=[{"column_name": "Company", "db_column_name": ["company_name"]},
+                                     {"column_name": "Employee", "db_column_name": ["employee_name"]}])).id
+        with patch("app.services.workflow_service.get_settings", return_value=settings), patch("app.services.workflow_service.send_report_content") as send_content:
+            run = self.service.run_job(self.db, job_id)
+        self.assertEqual(run.status, "Completed")
+        deliveries = {call.args[1][0]: call.args[2] for call in send_content.call_args_list}
+        self.assertEqual(set(deliveries), {"a@example.com", "b@example.com"})
+        self.assertIn("client_1_", deliveries["a@example.com"])
+        self.assertIn("client_2_", deliveries["b@example.com"])
+        self.assertTrue(self.service.repository.files(self.db)[0].file_name.endswith(".zip"))
         self.assert_catalog_only()
 
 

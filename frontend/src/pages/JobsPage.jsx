@@ -7,6 +7,7 @@ import ConfirmDialog from "../components/ConfirmDialog";
 
 function latestStatus(job) {
   if (!job.enabled) return "Disabled";
+  if (job.next_run_at && job.schedule_type !== "one_time") return "Scheduled";
   return job.last_run_status || "Scheduled";
 }
 
