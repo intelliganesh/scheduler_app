@@ -10,7 +10,7 @@ function parseTimestamp(value, assumedOffset) {
 
 function format(value, assumedOffset) {
   const date = parseTimestamp(value, assumedOffset);
-  return date ? new Intl.DateTimeFormat("en-US", {
+  return date ? new Intl.DateTimeFormat("en-IN", {
     timeZone: KOLKATA_TIME_ZONE,
     month: "2-digit",
     day: "2-digit",
@@ -21,8 +21,9 @@ function format(value, assumedOffset) {
   }).format(date) : "—";
 }
 
-// SQL Server returns created/execution timestamps as UTC-naive values in this project.
-export function formatUtcInKolkata(value) { return format(value, "Z"); }
+// SQL Server and the backend store audit/execution timestamps as timezone-naive
+// Asia/Kolkata wall-clock values. Attach the intended offset without shifting them.
+export function formatUtcInKolkata(value) { return format(value, "+05:30"); }
 
 // Schedules are stored as Asia/Kolkata wall-clock values for APScheduler.
 export function formatKolkata(value) { return format(value, "+05:30"); }
